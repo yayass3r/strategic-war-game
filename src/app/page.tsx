@@ -11,7 +11,7 @@ type TacticCategory = 'attack' | 'defense' | 'special';
 type LogType = 'info' | 'attack' | 'defense' | 'tactic' | 'movement' | 'system' | 'weather' | 'achievement';
 type WeatherType = 'clear' | 'rain' | 'snow' | 'fog' | 'storm';
 type Difficulty = 'easy' | 'normal' | 'hard' | 'legendary';
-type BuildingType = 'factory' | 'hospital' | 'fortress' | 'tower';
+type BuildingType = 'factory' | 'hospital' | 'fortress' | 'tower' | 'barracks' | 'defense_tower' | 'ammo_depot' | 'bunker';
 interface Ability { nameAr: string; desc: string; cooldown: number; cooldownLeft: number; active: boolean; activeTurns: number; }
 interface UnitDef { name: string; nameAr: string; hp: number; atk: number; def: number; mov: number; range: number; cost: number; icon: string; counters: UnitType[]; abilityNameAr: string; abilityDesc: string; abilityCooldown: number; }
 interface TerrainDef { nameAr: string; color: string; atkBonus: number; defBonus: number; movCost: number; icon: string; }
@@ -40,6 +40,9 @@ interface GameState {
   achievements: string[]; playerUsedPincer: number; playerUsedBlitzkrieg: boolean; playerUsedGuerrilla: boolean; playerUsedSiege: boolean; artilleryKills: number; playerLostNoUnits: boolean;
   showBattleModal: { attacker: Unit; defender: Unit; dmg: number; counterDmg: number; } | null;
   mapPreset: MapPreset;
+  buildMode: BuildingType | null;
+  validBuildPlacements: [number, number][];
+  playerBuildCount: number;
 }
 type Action =
   | { type: 'START_GAME'; difficulty: Difficulty; mapPreset: MapPreset }
@@ -58,7 +61,10 @@ type Action =
   | { type: 'CANCEL_ATTACK' }
   | { type: 'SAVE_GAME'; slot: number }
   | { type: 'LOAD_GAME'; slot: number }
-  | { type: 'CLEAR_EFFECTS' };
+  | { type: 'CLEAR_EFFECTS' }
+  | { type: 'ENTER_BUILD_MODE'; buildingType: BuildingType }
+  | { type: 'BUILD_BUILDING'; col: number; row: number }
+  | { type: 'CANCEL_BUILD' };
 // ==================== CONSTANTS ====================
 const COLS = 14, ROWS = 10, HEX_SIZE = 24;
 const SQRT3 = Math.sqrt(3);
@@ -71,7 +77,16 @@ const BUILDING_DEFS: Record<BuildingType, BuildingDef> = {
   hospital: { nameAr: 'مستشفى', icon: '🏥', color: '#e74c3c', desc: 'يشفي الوحدات المجاورة +15 HP/دور' },
   fortress: { nameAr: 'حصن', icon: '🏰', color: '#3498db', desc: '+50% دفاع للوحدة المحتلة' },
   tower: { nameAr: 'برج مراقبة', icon: '📡', color: '#9b59b6', desc: 'يكشف 5 سداسيات حوله' },
+  barracks: { nameAr: 'ثكنة تجنيد', icon: '🏗️', color: '#2ecc71', desc: 'تجنيد وحدات بتكلفة مخفضة 25% | +3 وحدة/دور إضافية' },
+  defense_tower: { nameAr: 'برج دفاعي', icon: '🗼', color: '#e74c3c', desc: 'يهجم تلقائياً على الأعداء في نطاق 2 بـ 15 ضرر/دور' },
+  ammo_depot: { nameAr: 'مستودع ذخيرة', icon: '📦', color: '#f39c12', desc: '+12 إمداد/دور لمن يسيطر | +5% هجوم للوحدات المجاورة' },
+  bunker: { nameAr: 'ملجأ دفاعي', icon: '🛡️', color: '#95a5a6', desc: '+40% دفاع للوحدة المحتلة | +20% دفاع للوحدات المجاورة' },
 };
+const BUILDING_COSTS: Record<BuildingType, number> = {
+  factory: 0, hospital: 0, fortress: 0, tower: 0,
+  barracks: 25, defense_tower: 20, ammo_depot: 15, bunker: 18,
+};
+const BUILDABLE_TYPES: BuildingType[] = ['barracks', 'defense_tower', 'ammo_depot', 'bunker'];
 const UNIT_DEFS: Record<UnitType, UnitDef> = {
   infantry: { name: 'Infantry', nameAr: 'مشاة', hp: 100, atk: 15, def: 20, mov: 2, range: 1, cost: 10, icon: '🗡️', counters: ['cavalry'], abilityNameAr: 'حفر خنادق', abilityDesc: '+40% دفاع لمدة دورين', abilityCooldown: 3 },
   armor: { name: 'Armor', nameAr: 'دروع', hp: 150, atk: 30, def: 25, mov: 3, range: 1, cost: 20, icon: '🛡️', counters: ['infantry'], abilityNameAr: 'صدمة', abilityDesc: 'الهجوم التالي ×2 ضرر', abilityCooldown: 4 },
@@ -228,6 +243,18 @@ function calcDamage(attacker: Unit, defender: Unit, tactic: TacticDef | null, se
   if (defender.entrenched) defStat *= 1.4;
   const cell = grid[defender.col]?.[defender.row];
   if (cell?.building === 'fortress' && cell.buildingOwner === defender.owner) defStat *= 1.5;
+  // Bunker defense bonus
+  const dCell = grid[defender.col]?.[defender.row];
+  if (dCell?.building === 'bunker' && dCell.buildingOwner === defender.owner) defStat *= 1.4;
+  for (const [nc, nr] of getNeighbors(defender.col, defender.row)) {
+    const n = grid[nc]?.[nr];
+    if (n?.building === 'bunker' && n.buildingOwner === defender.owner) { defStat *= 1.2; break; }
+  }
+  // Ammo depot attack bonus
+  for (const [nc, nr] of getNeighbors(attacker.col, attacker.row)) {
+    const n = grid[nc]?.[nr];
+    if (n?.building === 'ammo_depot' && n.buildingOwner === attacker.owner) { atkStat *= 1.05; break; }
+  }
   defStat *= (1 + getWeatherDefMod(weather));
   let bonus = 0;
   if (tactic?.special === 'pincer' && checkPincer(attacker, defender)) bonus += 0.3;
@@ -250,6 +277,52 @@ function calcCounterDamage(attacker: Unit, defender: Unit, tactic: TacticDef | n
   if (defender.range === 0) return 0;
   if (hexDist(attacker.col, attacker.row, defender.col, defender.row) > defender.range) return 0;
   return calcDamage(defender, attacker, tactic, secondary, grid, weather, dMorale, aMorale, true);
+}
+function calcBuildPlacements(state: GameState): [number, number][] {
+  const placements: [number, number][] = [];
+  const engineers = state.units.filter(u => u.owner === 'player' && u.type === 'engineers' && u.hp > 0);
+  if (engineers.length === 0) return placements;
+  for (let c = 0; c < COLS; c++) {
+    for (let r = 0; r < ROWS; r++) {
+      if (!state.revealed[c][r]) continue;
+      if (getUnitAt(state.units, c, r)) continue;
+      const cell = state.grid[c][r];
+      if (cell.building) continue;
+      const terrain = cell.terrain;
+      if (terrain === 'water' || terrain === 'mountain') continue;
+      const nearEngineer = engineers.some(e => hexDist(e.col, e.row, c, r) <= 2);
+      if (nearEngineer) placements.push([c, r]);
+    }
+  }
+  return placements;
+}
+function processDefenseTowerAttacks(state: GameState, units: Unit[], log: LogEntry[]): { units: Unit[]; log: LogEntry[]; effects: BattleEffect[] } {
+  let newUnits = [...units];
+  const newLog = [...log];
+  const newEffects: BattleEffect[] = [];
+  for (let c = 0; c < COLS; c++) {
+    for (let r = 0; r < ROWS; r++) {
+      const cell = state.grid[c][r];
+      if (cell.building !== 'defense_tower' || !cell.buildingOwner) continue;
+      const towerOwner = cell.buildingOwner;
+      const enemies = newUnits.filter(u => u.owner !== towerOwner && !u.isFake && u.hp > 0 && hexDist(c, r, u.col, u.row) <= 2);
+      if (enemies.length === 0) continue;
+      enemies.sort((a, b) => hexDist(c, r, a.col, a.row) - hexDist(c, r, b.col, b.row));
+      const target = enemies[0];
+      const dmg = 15;
+      const tIdx = newUnits.findIndex(u => u.id === target.id);
+      if (tIdx >= 0) {
+        newUnits[tIdx] = { ...newUnits[tIdx], hp: Math.max(0, newUnits[tIdx].hp - dmg) };
+        newLog.push({ turn: state.turn, msg: `🗼 برج دفاعي (${towerOwner === 'player' ? 'أنت' : 'عدو'}) هاجم ${UNIT_DEFS[target.type].nameAr} - ${dmg} ضرر`, type: 'attack' });
+        newEffects.push({ id: `fx_tower_${Date.now()}_${c}_${r}`, col: target.col, row: target.row, type: 'explosion', startTime: Date.now() });
+        if (newUnits[tIdx].hp <= 0) {
+          newUnits = newUnits.filter(u => u.id !== target.id);
+          newLog.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[target.type].nameAr} دُمر بالبرج!`, type: 'system' });
+        }
+      }
+    }
+  }
+  return { units: newUnits, log: newLog, effects: newEffects };
 }
 // ==================== RNG & MAP GENERATION ====================
 function createRNG() { let s = Date.now(); return () => { s = (s * 16807) % 2147483647; return s / 2147483647; }; }
@@ -478,6 +551,7 @@ const initialState: GameState = {
   effects: [], shakeKey: 0,
   achievements: [], playerUsedPincer: 0, playerUsedBlitzkrieg: false, playerUsedGuerrilla: false, playerUsedSiege: false, artilleryKills: 0, playerLostNoUnits: true,
   showBattleModal: null, mapPreset: 'classic',
+  buildMode: null, validBuildPlacements: [], playerBuildCount: 0,
 };
 function gameReducer(state: GameState, action: Action): GameState {
   switch (action.type) {
@@ -522,6 +596,34 @@ function gameReducer(state: GameState, action: Action): GameState {
     case 'SAVE_GAME': { try { if (typeof window !== 'undefined') localStorage.setItem(`warGame_save_${action.slot}`, JSON.stringify(state)); } catch {} return state; }
     case 'LOAD_GAME': { try { if (typeof window !== 'undefined') { const d = localStorage.getItem(`warGame_save_${action.slot}`); if (d) return JSON.parse(d); } } catch {} return state; }
     case 'CLEAR_EFFECTS': return { ...state, effects: state.effects.filter(e => Date.now() - e.startTime < 1000) };
+    case 'ENTER_BUILD_MODE': {
+      if (state.playerBuildCount >= 1) return state;
+      const cost = BUILDING_COSTS[action.buildingType];
+      if (state.player.supply < cost) return state;
+      const placements = calcBuildPlacements(state);
+      if (placements.length === 0) return state;
+      return { ...state, buildMode: action.buildingType, validBuildPlacements: placements, deployMode: null };
+    }
+    case 'BUILD_BUILDING': {
+      if (!state.buildMode) return state;
+      if (state.playerBuildCount >= 1) return state;
+      if (!state.validBuildPlacements.some(([bc, br]) => bc === action.col && br === action.row)) return state;
+      const cost = BUILDING_COSTS[state.buildMode];
+      if (state.player.supply < cost) return state;
+      const bDef = BUILDING_DEFS[state.buildMode];
+      const newGrid = state.grid.map(c => c.map(cell =>
+        cell.col === action.col && cell.row === action.row
+          ? { ...cell, building: state.buildMode!, buildingOwner: 'player' as Owner }
+          : cell
+      ));
+      return {
+        ...state, grid: newGrid, buildMode: null, validBuildPlacements: [],
+        player: { ...state.player, supply: state.player.supply - cost },
+        playerBuildCount: state.playerBuildCount + 1,
+        log: [...state.log, { turn: state.turn, msg: `🏗️ تم بناء ${bDef.nameAr}!`, type: 'system' }]
+      };
+    }
+    case 'CANCEL_BUILD': return { ...state, buildMode: null, validBuildPlacements: [] };
     default: return state;
   }
 }
@@ -670,12 +772,26 @@ function handleConfirmAttack(state: GameState): GameState {
 }
 function handleHexClick(state: GameState, col: number, row: number): GameState {
   if (state.phase !== 'movement' && state.phase !== 'attack') return state;
+  // Build mode handling
+  if (state.buildMode) {
+    if (state.validBuildPlacements.some(([bc, br]) => bc === col && br === row)) {
+      return gameReducer(state, { type: 'BUILD_BUILDING', col, row });
+    }
+    return { ...state, buildMode: null, validBuildPlacements: [] };
+  }
   if (state.deployMode) {
     const cost = UNIT_DEFS[state.deployMode].cost;
     if (state.player.supply < cost || col > 2 || getTerrainAt(state.grid, col, row) === 'water' || getUnitAt(state.units, col, row)) return state;
+    const nearBarracks = getNeighbors(col, row).some(([nc, nr]) => {
+      const cell = state.grid[nc]?.[nr];
+      return cell?.building === 'barracks' && cell.buildingOwner === 'player';
+    });
+    const discount = nearBarracks ? 0.75 : 1;
+    const finalCost = Math.floor(cost * discount);
+    if (state.player.supply < finalCost) return state;
     const def = UNIT_DEFS[state.deployMode];
     const newUnit = createUnit(Date.now(), state.deployMode, 'player', col, row);
-    return { ...state, units: [...state.units, { ...newUnit, moved: true, attacked: true }], player: { ...state.player, supply: state.player.supply - cost }, deployMode: null, log: [...state.log, { turn: state.turn, msg: `✦ تم نشر ${def.nameAr}`, type: 'tactic' }] };
+    return { ...state, units: [...state.units, { ...newUnit, moved: true, attacked: true }], player: { ...state.player, supply: state.player.supply - finalCost }, deployMode: null, log: [...state.log, { turn: state.turn, msg: `✦ تم نشر ${def.nameAr}${nearBarracks ? ' (خصم ثكنة!)' : ''}`, type: 'tactic' }] };
   }
   const clicked = getUnitAt(state.units, col, row);
   const tactic = TACTICS.find(t => t.id === state.playerTactic);
@@ -890,15 +1006,52 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
     if (ai.supply < cost) continue;
     for (let c = 13; c >= 11; c--) { for (let r = 0; r < ROWS; r++) { if (!getUnitAt(units, c, r) && getTerrainAt(state.grid, c, r) !== 'water') { units.push({ ...createUnit(Date.now() + d, type, 'ai', c, r), moved: true, attacked: true }); ai = { ...ai, supply: ai.supply - cost }; log.push({ turn: state.turn, msg: `▸ العدو نشر ${UNIT_DEFS[type].nameAr}`, type: 'tactic' }); break; } } if (ai.supply < cost) break; }
   }
+  // AI builds structures
+  const aiEngineers = units.filter(u => u.owner === 'ai' && u.type === 'engineers' && u.hp > 0);
+  if (aiEngineers.length > 0 && ai.supply >= 15) {
+    for (const engineer of aiEngineers) {
+      if (ai.supply < 15) break;
+      const neighbors = getNeighbors(engineer.col, engineer.row);
+      const buildable = neighbors.filter(([nc, nr]) => {
+        const cell = state.grid[nc]?.[nr];
+        return cell && !cell.building && !getUnitAt(units, nc, nr) && cell.terrain !== 'water' && cell.terrain !== 'mountain' && nc >= 6;
+      });
+      if (buildable.length === 0) continue;
+      let bType: BuildingType;
+      const aiFactoryCount = state.grid.flat().filter(c => c.building === 'barracks' && c.buildingOwner === 'ai').length;
+      const aiDefenseCount = state.grid.flat().filter(c => c.building === 'defense_tower' && c.buildingOwner === 'ai').length;
+      if (aiDefenseCount < 1 && ai.supply >= BUILDING_COSTS.defense_tower) {
+        bType = 'defense_tower';
+      } else if (aiFactoryCount < 1 && ai.supply >= BUILDING_COSTS.barracks) {
+        bType = 'barracks';
+      } else {
+        const options = BUILDABLE_TYPES.filter(t => ai.supply >= BUILDING_COSTS[t]);
+        bType = options[Math.floor(Math.random() * options.length)] || 'bunker';
+      }
+      const cost = BUILDING_COSTS[bType];
+      if (ai.supply < cost) continue;
+      const [bc, br] = buildable[Math.floor(Math.random() * buildable.length)];
+      state.grid[bc][br].building = bType;
+      state.grid[bc][br].buildingOwner = 'ai';
+      ai = { ...ai, supply: ai.supply - cost };
+      log.push({ turn: state.turn, msg: `▸ العدو بنى ${BUILDING_DEFS[bType].nameAr}`, type: 'system' });
+      break;
+    }
+  }
   return { units, log, ai, playerSupplyDelta };
 }
 function handleAIComplete(state: GameState): GameState {
   const { units: newUnits, log: aiLog, ai: newAi, playerSupplyDelta } = aiExecuteTurn(state);
-  const finalUnits = newUnits.filter(u => !u.isFake || u.fakeTurns > 0).map(u => u.isFake ? { ...u, fakeTurns: u.fakeTurns - 1 } : u);
+  // Process defense tower attacks
+  const towerResult = processDefenseTowerAttacks(state, newUnits, aiLog);
+  const towerUnits = towerResult.units;
+  const towerLog = towerResult.log;
+  const towerEffects = towerResult.effects;
+  const finalUnits = towerUnits.filter(u => !u.isFake || u.fakeTurns > 0).map(u => u.isFake ? { ...u, fakeTurns: u.fakeTurns - 1 } : u);
   const aiAlive = finalUnits.filter(u => u.owner === 'ai' && !u.isFake && u.hp > 0).length;
   const playerAlive = finalUnits.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).length;
   if (aiAlive === 0 || playerAlive === 0) {
-    const w: GameState = { ...state, units: finalUnits, ai: newAi, animating: false, log: [...state.log, ...aiLog], winner: aiAlive === 0 ? 'player' : 'ai', screen: 'game_over', playerUnitsKilled: state.playerUnitsKilled, aiUnitsKilled: state.aiUnitsKilled, playerUsedPincer: state.playerUsedPincer, playerUsedBlitzkrieg: state.playerUsedBlitzkrieg, playerUsedGuerrilla: state.playerUsedGuerrilla, playerUsedSiege: state.playerUsedSiege, artilleryKills: state.artilleryKills, playerLostNoUnits: state.playerLostNoUnits, tacticsUsed: state.tacticsUsed, totalDamageDealt: state.totalDamageDealt, totalDamageReceived: state.totalDamageReceived };
+    const w: GameState = { ...state, units: finalUnits, ai: newAi, animating: false, log: [...state.log, ...towerLog], winner: aiAlive === 0 ? 'player' : 'ai', screen: 'game_over', playerUnitsKilled: state.playerUnitsKilled, aiUnitsKilled: state.aiUnitsKilled, playerUsedPincer: state.playerUsedPincer, playerUsedBlitzkrieg: state.playerUsedBlitzkrieg, playerUsedGuerrilla: state.playerUsedGuerrilla, playerUsedSiege: state.playerUsedSiege, artilleryKills: state.artilleryKills, playerLostNoUnits: state.playerLostNoUnits, tacticsUsed: state.tacticsUsed, totalDamageDealt: state.totalDamageDealt, totalDamageReceived: state.totalDamageReceived };
     if (w.winner === 'player') checkAchievements(w);
     return w;
   }
@@ -944,6 +1097,10 @@ function handleAIComplete(state: GameState): GameState {
       if (unit?.owner === 'player') pFactoryBonus += 5;
       if (unit?.owner === 'ai') aFactoryBonus += 5;
     }
+    if (cell.building === 'ammo_depot') {
+      if (cell.buildingOwner === 'player') pFactoryBonus += 12;
+      if (cell.buildingOwner === 'ai') aFactoryBonus += 12;
+    }
   }
   const newGrid = state.grid.map(col => col.map(cell => {
     const u = getUnitAt(buildingUnits, cell.col, cell.row);
@@ -969,14 +1126,14 @@ function handleAIComplete(state: GameState): GameState {
   const aiNewTactic = aiSelectTactic({ ...state, units: stormDmg, turn: newTurn });
   const supplyGain = 10 + pFactoryBonus;
   const aiSupplyGain = 10 + aFactoryBonus + (state.difficulty === 'hard' ? 5 : state.difficulty === 'legendary' ? 10 : 0);
-  const nextLog = [...state.log, ...aiLog, { turn: newTurn, msg: `═══ الدور ${newTurn} ═══`, type: 'info' }, { turn: newTurn, msg: `📦 +${supplyGain} إمداد, +5 تدريب | ${WEATHER_NAMES[weather].icon} ${WEATHER_NAMES[weather].name}`, type: 'info' }];
+  const nextLog = [...state.log, ...towerLog, { turn: newTurn, msg: `═══ الدور ${newTurn} ═══`, type: 'info' }, { turn: newTurn, msg: `📦 +${supplyGain} إمداد, +5 تدريب | ${WEATHER_NAMES[weather].icon} ${WEATHER_NAMES[weather].name}`, type: 'info' }];
   if (playerSupplyDelta < 0) nextLog.push({ turn: newTurn, msg: `📉 -${Math.abs(playerSupplyDelta)} إمداد (تأثير العدو)`, type: 'tactic' });
   try { if (typeof window !== 'undefined') localStorage.setItem('warGame_auto', JSON.stringify({ ...state, units: stormDmg, grid: newGrid, revealed, turn: newTurn })); } catch {}
   return {
-    ...state, units: stormDmg, grid: newGrid, revealed, ai: { ...newAi, supply: Math.max(0, newAi.supply + aiSupplyGain - aiSupplyRed), training: newAi.training >= 20 ? newAi.training - 20 + 5 : newAi.training + 5, morale: aMorale },
+    ...state, units: stormDmg, grid: newGrid, revealed, effects: [...state.effects, ...towerEffects.filter(e => Date.now() - e.startTime < 1000)], ai: { ...newAi, supply: Math.max(0, newAi.supply + aiSupplyGain - aiSupplyRed), training: newAi.training >= 20 ? newAi.training - 20 + 5 : newAi.training + 5, morale: aMorale },
     phase: 'planning', turn: newTurn, animating: false,
     playerTactic: null, secondaryPlayerTactic: null, aiTactic: aiNewTactic, tacticId: null, secondaryTacticId: null,
-    selectedId: null, validMoves: [], validAttacks: [], deployMode: null, log: nextLog,
+    selectedId: null, validMoves: [], validAttacks: [], deployMode: null, buildMode: null, validBuildPlacements: [], playerBuildCount: 0, log: nextLog,
     player: { supply: Math.max(0, state.player.supply + supplyGain + playerSupplyDelta), morale: pMorale, training: state.player.training >= 20 ? state.player.training - 20 + 5 : state.player.training + 5 },
     weather, weatherTurnsLeft: wTurnsLeft,
     previousState: null,
@@ -1030,7 +1187,7 @@ function MainMenu({ onStart, onHelp, onLoad }: { onStart: (d: Difficulty) => voi
         </div>
         <div className="mt-4 text-gray-500 text-xs space-y-1">
           <p>⚔️ 13 وحدة | 🗺️ 7 خرائط | 🏗️ مباني | 🌦️ طقس</p>
-          <p>🏰 12 تكتيك عسكري | 🎯 هجمات خاصة | 🏆 إنجازات</p>
+          <p>🏰 12 تكتيك عسكري | 🎯 هجمات خاصة | 🏆 إنجازات | 🏗️ بناء قواعد</p>
         </div>
       </div>
     </div>
@@ -1095,6 +1252,14 @@ function HowToPlay({ onBack }: { onBack: () => void }) {
           <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">🏔️ ضباب الحرب</h2><p>لا ترى سوى منطقة حول وحداتك. البرج يكشف مساحة واسعة</p></div>
           <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">🌧️ الطقس</h2><p>يتغير كل 3 أدوار ويؤثر على الحركة والهجوم والمعنويات</p></div>
           <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">🏗️ المباني</h2><p>تحرك إلى المبنى للسيطرة عليه: مصنع (+إمداد) | مستشفى (+شفاء) | حصن (+دفاع) | برج (كشف)</p></div>
+          <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">🏗️ بناء القواعد العسكرية</h2>
+            <div className="space-y-1 mt-1">
+              <div>🔧 يحتاج مهندسين بجانب الموقع للبناء</div>
+              <div>🏗️ ثكنة: تجنيد بتكلفة مخفضة 25% | 🗼 برج دفاعي: يهاجم الأعداء تلقائياً</div>
+              <div>📦 مستودع ذخيرة: +12 إمداد/دور | 🛡️ ملجأ: +40% دفاع للوحدة و+20% للجوار</div>
+              <div className="text-orange-400">⚠️ يمكن بناء مبنى واحد فقط لكل دور</div>
+            </div>
+          </div>
           <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">✂️ نقاط ضعف</h2><p>مشاة&gt;فرسان&gt;مدفعية&gt;دروع&gt;مشاة | قوات خاصة&gt;مدفعية | كوماندوز&gt;دروع,مدفعية | مشاة بحرية&gt;قوات خاصة | مدفعية صاروخية&gt;دروع,مشاة</p></div>
           <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">⭐ الخبرة القتالية</h2><p>الوحدات تكسب خبرة من القتال وترتفع مستوياتها لتصبح أقوى</p></div>
           <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">⚡ القدرات الخاصة</h2>
@@ -1164,6 +1329,7 @@ function GameHeader({ state, dispatch }: { state: GameState; dispatch: React.Dis
       <div className="flex items-center gap-1 flex-wrap">
         <div className="text-gray-300 px-2 py-1 rounded" style={{ background: '#0f3460' }}>{phaseNames[state.phase]}</div>
         {tactic && <div className="text-yellow-400 px-2 py-1 rounded" style={{ background: '#0f3460', fontSize: '10px' }}>{tactic.name}</div>}
+        {state.buildMode && <div className="text-green-400 px-2 py-1 rounded" style={{ background: '#0f3460', fontSize: '10px' }}>🔨 بناء: {BUILDING_DEFS[state.buildMode].nameAr}</div>}
         <button onClick={() => dispatch({ type: 'UNDO' })} disabled={!state.previousState} className="px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer disabled:opacity-30" title="تراجع">↩️</button>
         <button onClick={() => dispatch({ type: 'SAVE_GAME', slot: 0 })} className="px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer" title="حفظ">💾</button>
         {(state.phase === 'movement' || state.phase === 'attack') && (
@@ -1182,6 +1348,7 @@ function HexGridComp({ state, dispatch }: { state: GameState; dispatch: React.Di
   const secondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic) ?? null;
   const validMoveSet = new Set(state.validMoves.map(([c, r]) => `${c},${r}`));
   const validAttackSet = new Set(state.validAttacks.map(([c, r]) => `${c},${r}`));
+  const validBuildSet = new Set(state.validBuildPlacements.map(([c, r]) => `${c},${r}`));
   const selected = state.selectedId ? state.units.find(u => u.id === state.selectedId) : null;
   let dmgPreview: { col: number; row: number; dmg: number; counterDmg: number } | null = null;
   if (state.hoverHex && selected && validAttackSet.has(`${state.hoverHex[0]},${state.hoverHex[1]}`)) {
@@ -1209,16 +1376,20 @@ function HexGridComp({ state, dispatch }: { state: GameState; dispatch: React.Di
           const isValidAttack = validAttackSet.has(`${ci},${ri}`);
           const isHovered = state.hoverHex?.[0] === ci && state.hoverHex?.[1] === ri;
           const isDeploy = state.deployMode && ci <= 2 && !unit && cell.terrain !== 'water';
+          const isValidBuild = validBuildSet.has(`${ci},${ri}`);
+          const isBuildHover = state.buildMode && state.hoverHex?.[0] === ci && state.hoverHex?.[1] === ri && isValidBuild;
           const showEnemy = unit && unit.owner === 'ai' && !unit.isFake && isRevealed;
           const isFog = !isRevealed;
           let fill = isFog ? '#111118' : terrain.color;
           if (isValidMove) fill = '#3498db';
           if (isValidAttack) fill = '#e74c3c';
           if (isDeploy && isHovered) fill = '#2ecc71';
+          if (isBuildHover) fill = '#27ae60';
+          else if (isValidBuild && !isFog) fill = '#1a5c30';
           const bldg = cell.building ? BUILDING_DEFS[cell.building] : null;
           return (
             <g key={`${ci}-${ri}`}>
-              <path d={hexPathStr(cx, cy, HEX_SIZE - 1)} fill={fill} stroke={isSelected ? '#ffd700' : isHovered && !isFog ? '#fff' : '#2c3e50'} strokeWidth={isSelected ? 3 : isHovered ? 1.5 : 0.5} style={{ cursor: isFog ? 'default' : 'pointer' }} filter={isSelected ? 'url(#selGlow)' : isValidMove || isValidAttack ? 'url(#glow)' : undefined} onClick={() => !isFog && dispatch({ type: 'HEX_CLICK', col: ci, row: ri })} onMouseEnter={() => dispatch({ type: 'HEX_HOVER', col: ci, row: ri })} onMouseLeave={() => dispatch({ type: 'HEX_HOVER', col: -1, row: null })} opacity={isValidMove ? 0.6 : isValidAttack ? 0.6 : 1} />
+              <path d={hexPathStr(cx, cy, HEX_SIZE - 1)} fill={fill} stroke={isSelected ? '#ffd700' : isValidBuild ? '#2ecc71' : isHovered && !isFog ? '#fff' : '#2c3e50'} strokeWidth={isSelected ? 3 : isValidBuild ? 2 : isHovered ? 1.5 : 0.5} style={{ cursor: isFog ? 'default' : 'pointer' }} filter={isSelected ? 'url(#selGlow)' : isValidMove || isValidAttack ? 'url(#glow)' : undefined} onClick={() => !isFog && dispatch({ type: 'HEX_CLICK', col: ci, row: ri })} onMouseEnter={() => dispatch({ type: 'HEX_HOVER', col: ci, row: ri })} onMouseLeave={() => dispatch({ type: 'HEX_HOVER', col: -1, row: null })} opacity={isValidMove ? 0.6 : isValidAttack ? 0.6 : 1} />
               {isFog && <text x={cx} y={cy + 4} textAnchor="middle" fontSize="10" fill="#333" style={{ pointerEvents: 'none' }}>?</text>}
               {!isFog && <text x={cx} y={cy + HEX_SIZE * 0.35} textAnchor="middle" fontSize="10" style={{ pointerEvents: 'none' }}>{terrain.icon}</text>}
               {!isFog && bldg && <text x={cx - 8} y={cy - HEX_SIZE * 0.25} textAnchor="middle" fontSize="10" style={{ pointerEvents: 'none' }}>{bldg.icon}</text>}
@@ -1348,6 +1519,32 @@ function TacticSelector({ state, dispatch }: { state: GameState; dispatch: React
           })}
         </div>
         {state.deployMode && <p className="text-green-400 text-xs mt-1 text-center">🎯 انقر في منطقتك (الأعمدة 0-2)</p>}
+      </div>
+      <div className="border-t border-gray-700 pt-2 mt-2">
+        <div className="text-white font-bold text-xs mb-1">🏗️ بناء المباني (المهندسين فقط)</div>
+        <div className="text-gray-400 text-xs mb-1">المهندس يجب أن يكون بجوار الموقع</div>
+        <div className="grid grid-cols-2 gap-1">
+          {BUILDABLE_TYPES.map(bt => {
+            const bd = BUILDING_DEFS[bt];
+            const cost = BUILDING_COSTS[bt];
+            const canAfford = state.player.supply >= cost;
+            const hasEngineer = state.units.some(u => u.owner === 'player' && u.type === 'engineers' && u.hp > 0 && !u.moved);
+            const canBuild = canAfford && hasEngineer && state.playerBuildCount < 1;
+            return (
+              <button key={bt} onClick={() => canBuild ? dispatch({ type: 'ENTER_BUILD_MODE', buildingType: bt }) : undefined} disabled={!canBuild} className={`p-1.5 rounded text-xs text-right cursor-pointer ${state.buildMode === bt ? 'ring-2 ring-green-400' : ''} ${!canBuild ? 'opacity-40' : 'hover:bg-white/5'}`} style={{ background: state.buildMode === bt ? '#0f3460' : '#1a2332' }}>
+                <div className="text-sm">{bd.icon} {bd.nameAr}</div>
+                <div className="text-gray-400" style={{ fontSize: '9px' }}>{bd.desc}</div>
+                <div className="text-yellow-400" style={{ fontSize: '9px' }}>📦 {cost}</div>
+              </button>
+            );
+          })}
+        </div>
+        {state.buildMode && (
+          <div className="text-green-400 text-xs mt-1 text-center">
+            🎯 انقر موقع البناء في منطقتك | <button onClick={() => dispatch({ type: 'CANCEL_BUILD' })} className="text-red-400 underline">إلغاء</button>
+          </div>
+        )}
+        {state.playerBuildCount >= 1 && <p className="text-orange-400 text-xs mt-1">⚠️ بناء واحد فقط لكل دور</p>}
       </div>
     </div>
   );
