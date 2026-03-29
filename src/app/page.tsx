@@ -1,10 +1,11 @@
 'use client';
 import React, { useReducer, useCallback, useMemo, useEffect, useRef, useState } from 'react';
 // ==================== TYPES ====================
-type TerrainType = 'plains' | 'mountain' | 'forest' | 'water' | 'desert';
-type UnitType = 'infantry' | 'armor' | 'artillery' | 'special_forces' | 'cavalry' | 'missiles';
+type TerrainType = 'plains' | 'mountain' | 'forest' | 'water' | 'desert' | 'urban' | 'swamp' | 'oasis' | 'road' | 'ruins' | 'ice' | 'beach' | 'volcanic';
+type UnitType = 'infantry' | 'armor' | 'artillery' | 'special_forces' | 'cavalry' | 'missiles' | 'medics' | 'engineers' | 'scouts' | 'marines' | 'rocket_artillery' | 'commando' | 'supply_truck';
 type Owner = 'player' | 'ai';
-type GameScreen = 'menu' | 'playing' | 'how_to_play' | 'game_over';
+type MapPreset = 'classic' | 'desert_storm' | 'mountain_pass' | 'island_hopping' | 'forest_ambush' | 'urban_warfare' | 'river_crossing';
+type GameScreen = 'menu' | 'playing' | 'how_to_play' | 'game_over' | 'map_select';
 type GamePhase = 'planning' | 'movement' | 'attack' | 'ai_turn';
 type TacticCategory = 'attack' | 'defense' | 'special';
 type LogType = 'info' | 'attack' | 'defense' | 'tactic' | 'movement' | 'system' | 'weather' | 'achievement';
@@ -38,9 +39,10 @@ interface GameState {
   effects: BattleEffect[]; shakeKey: number;
   achievements: string[]; playerUsedPincer: number; playerUsedBlitzkrieg: boolean; playerUsedGuerrilla: boolean; playerUsedSiege: boolean; artilleryKills: number; playerLostNoUnits: boolean;
   showBattleModal: { attacker: Unit; defender: Unit; dmg: number; counterDmg: number; } | null;
+  mapPreset: MapPreset;
 }
 type Action =
-  | { type: 'START_GAME'; difficulty: Difficulty }
+  | { type: 'START_GAME'; difficulty: Difficulty; mapPreset: MapPreset }
   | { type: 'SET_SCREEN'; screen: GameScreen }
   | { type: 'SELECT_TACTIC'; id: string | null; secondary?: boolean }
   | { type: 'CONFIRM_TACTIC' }
@@ -77,6 +79,13 @@ const UNIT_DEFS: Record<UnitType, UnitDef> = {
   special_forces: { name: 'SpecOps', nameAr: 'قوات خاصة', hp: 80, atk: 25, def: 15, mov: 4, range: 1, cost: 15, icon: '⚔️', counters: ['artillery'], abilityNameAr: 'اغتيال', abilityDesc: '×3 ضرر لوحدة واحدة', abilityCooldown: 4 },
   cavalry: { name: 'Cavalry', nameAr: 'فرسان', hp: 90, atk: 20, def: 10, mov: 5, range: 1, cost: 12, icon: '🐴', counters: ['artillery'], abilityNameAr: 'هجوم سهم', abilityDesc: 'تحرك+هجوم، ×2 ضرر', abilityCooldown: 3 },
   missiles: { name: 'Missiles', nameAr: 'صواريخ', hp: 30, atk: 60, def: 0, mov: 0, range: 5, cost: 25, icon: '🚀', counters: [], abilityNameAr: '', abilityDesc: '', abilityCooldown: 0 },
+  medics: { name: 'Medics', nameAr: 'طبيب ميداني', hp: 70, atk: 5, def: 10, mov: 3, range: 1, cost: 15, icon: '⚕️', counters: [], abilityNameAr: 'علاج طارئ', abilityDesc: 'يشفي وحدة مجاورة +40 HP', abilityCooldown: 3 },
+  engineers: { name: 'Engineers', nameAr: 'مهندسين', hp: 80, atk: 10, def: 15, mov: 2, range: 1, cost: 12, icon: '🔧', counters: [], abilityNameAr: 'تحصين', abilityDesc: '+60% دفاع للوحدة نفسها لمدة 3 أدوار', abilityCooldown: 4 },
+  scouts: { name: 'Scouts', nameAr: 'مستكشفين', hp: 50, atk: 10, def: 5, mov: 6, range: 1, cost: 8, icon: '🔭', counters: [], abilityNameAr: 'رصد', abilityDesc: 'يكشف كل خريطة المنطقة المحيطة بمدى 6', abilityCooldown: 2 },
+  marines: { name: 'Marines', nameAr: 'مشاة بحرية', hp: 110, atk: 20, def: 18, mov: 3, range: 1, cost: 18, icon: '⚓', counters: ['special_forces'], abilityNameAr: 'إنزال بحري', abilityDesc: 'يمكن التحرك فوق الماء لمدة دورين', abilityCooldown: 4 },
+  rocket_artillery: { name: 'Rocket Artillery', nameAr: 'مدفعية صاروخية', hp: 45, atk: 50, def: 3, mov: 1, range: 4, cost: 22, icon: '🎆', counters: ['armor', 'infantry'], abilityNameAr: 'قصف صاروخي', abilityDesc: 'يهجم على كل الأعداء في نطاق 3', abilityCooldown: 6 },
+  commando: { name: 'Commando', nameAr: 'كوماندوز', hp: 90, atk: 30, def: 12, mov: 4, range: 1, cost: 18, icon: '🎯', counters: ['armor', 'artillery'], abilityNameAr: 'عملية خاصة', abilityDesc: 'الهجوم التالي ×2 ضرر ويشفي 20 HP', abilityCooldown: 4 },
+  supply_truck: { name: 'Supply Truck', nameAr: 'شاحنة إمداد', hp: 40, atk: 0, def: 5, mov: 3, range: 0, cost: 10, icon: '🚛', counters: [], abilityNameAr: 'إمداد', abilityDesc: '+15 إمداد فوري للاعب', abilityCooldown: 3 },
 };
 const TERRAIN_DEFS: Record<TerrainType, TerrainDef> = {
   plains: { nameAr: 'سهل', color: '#4a6741', atkBonus: 0, defBonus: 0, movCost: 1, icon: '🌾' },
@@ -84,6 +93,14 @@ const TERRAIN_DEFS: Record<TerrainType, TerrainDef> = {
   forest: { nameAr: 'غابة', color: '#2d5a27', atkBonus: 0, defBonus: 0.3, movCost: 2, icon: '🌲' },
   water: { nameAr: 'ماء', color: '#1a5276', atkBonus: 0, defBonus: 0, movCost: 99, icon: '🌊' },
   desert: { nameAr: 'صحراء', color: '#c2a83e', atkBonus: 0.1, defBonus: -0.1, movCost: 2, icon: '🏜️' },
+  urban: { nameAr: 'مدينة', color: '#5d6d7e', atkBonus: -0.1, defBonus: 0.4, movCost: 2, icon: '🏙️' },
+  swamp: { nameAr: 'مستنقع', color: '#3d5c3a', atkBonus: -0.2, defBonus: -0.1, movCost: 3, icon: '🐻' },
+  oasis: { nameAr: 'واحة', color: '#48c9b0', atkBonus: 0, defBonus: 0.1, movCost: 1, icon: '🏞️' },
+  road: { nameAr: 'طريق', color: '#8e8e8e', atkBonus: 0, defBonus: 0, movCost: 0.5, icon: '🛤️' },
+  ruins: { nameAr: 'أطلال', color: '#7f8c8d', atkBonus: 0, defBonus: 0.35, movCost: 2, icon: '🏚️' },
+  ice: { nameAr: 'جليد', color: '#a8d8ea', atkBonus: 0, defBonus: -0.2, movCost: 3, icon: '🧊' },
+  beach: { nameAr: 'شاطئ', color: '#f5cba7', atkBonus: 0, defBonus: -0.2, movCost: 1, icon: '🏖️' },
+  volcanic: { nameAr: 'بركاني', color: '#641e16', atkBonus: 0, defBonus: -0.3, movCost: 3, icon: '🌋' },
 };
 const TACTICS: TacticDef[] = [
   { id: 'pincer', name: 'الكماشة', desc: '+30% هجوم عند الهجوم من جهتين متجاورتين', ref: 'معركة كاناي - هنيبعل', category: 'attack', atkMod: 0, defMod: 0, movMod: 0, special: 'pincer' },
@@ -107,6 +124,15 @@ const ACHIEVEMENT_DEFS: Record<string, { nameAr: string; desc: string; icon: str
   war_master: { nameAr: 'أسياد الحرب', desc: 'فز على صعوبة أستاذ الحرب', icon: '👑' },
   artillery_master: { nameAr: 'المدفعجي', desc: 'دمّر 5+ وحدات بالمدفعية', icon: '💣' },
   siege_master: { nameAr: 'حصار محكم', desc: 'فز باستخدام الحصار', icon: '🏰' },
+};
+const MAP_PRESET_INFO: Record<MapPreset, { name: string; icon: string; desc: string; color: string; difficulty: string }> = {
+  classic: { name: 'كلاسيكي', icon: '🗺️', desc: 'خريطة متوازنة مع تضاريس متنوعة', color: '#4a6741', difficulty: 'عادي' },
+  desert_storm: { name: 'عاصفة الصحراء', icon: '🏜️', desc: 'معارك صحراوية - فرسان ودروع تتفوق', color: '#c2a83e', difficulty: 'صعب' },
+  mountain_pass: { name: 'ممر جبلي', icon: '⛰️', desc: 'معارك في الوديان والمناطق الوعرة', color: '#8b7355', difficulty: 'صعب' },
+  island_hopping: { name: 'قفز الجزر', icon: '🏝️', desc: 'معارك بحرية وجزر - المشاة البحرية تتفوق', color: '#1a5276', difficulty: 'صعب' },
+  forest_ambush: { name: 'كمين الغابة', icon: '🌲', desc: 'غابات كثافة - القوات الخاصة والمستكشفين', color: '#2d5a27', difficulty: 'عادي' },
+  urban_warfare: { name: 'حرب المدن', icon: '🏙️', desc: 'قتال حضري في الشوارع والمباني', color: '#5d6d7e', difficulty: 'عادي' },
+  river_crossing: { name: 'عبور النهر', icon: '🌊', desc: 'اعبر النهر وسيطر على الجسور', color: '#2980b9', difficulty: 'عادي' },
 };
 // ==================== HEX UTILITIES ====================
 function hexCenter(col: number, row: number): [number, number] {
@@ -150,6 +176,8 @@ function calcValidMoves(unit: Unit, grid: HexCell[][], units: Unit[], tactic: Ta
       const key = `${nc},${nr}`;
       const terrain = getTerrainAt(grid, nc, nr);
       let movCost = TERRAIN_DEFS[terrain].movCost;
+      // Marines with ability active can move on water
+      if (unit.type === 'marines' && unit.abilityActive && terrain === 'water') movCost = 1;
       if (unit.type !== 'cavalry' && isAdjacentToEnemy(units, nc, nr, unit.owner)) movCost += 2;
       const newCost = cost + movCost;
       const prev = visited.get(key);
@@ -166,6 +194,7 @@ function calcValidMoves(unit: Unit, grid: HexCell[][], units: Unit[], tactic: Ta
   return [...new Map(result.map(r => [`${r[0]},${r[1]}`, r])).values()];
 }
 function calcValidAttacks(unit: Unit, units: Unit[], tactic: TacticDef | null): [number, number][] {
+  if (unit.range === 0) return [];
   const enemies = units.filter(u => u.owner !== unit.owner && !u.isFake && u.hp > 0);
   const tacticRange = (tactic?.special === 'siege') ? unit.range + 1 : unit.range;
   return enemies.filter(e => hexDist(unit.col, unit.row, e.col, e.row) <= tacticRange).map(e => [e.col, e.row] as [number, number]);
@@ -181,8 +210,6 @@ function getCounterBonus(atkType: UnitType, defType: UnitType): number { return 
 function calcDamage(attacker: Unit, defender: Unit, tactic: TacticDef | null, secondary: TacticDef | null, grid: HexCell[][], weather: WeatherType, attackerMorale: number, defenderMorale: number, isCounter: boolean): number {
   const aTerrain = getTerrainAt(grid, attacker.col, attacker.row);
   const dTerrain = getTerrainAt(grid, defender.col, defender.row);
-  const aDef = UNIT_DEFS[attacker.type];
-  const dDef = UNIT_DEFS[defender.type];
   let atkStat = attacker.atk * (1 + (tactic?.atkMod ?? 0) + (secondary ? (secondary.atkMod ?? 0) * 0.5 : 0));
   atkStat *= (1 + TERRAIN_DEFS[aTerrain].atkBonus);
   atkStat *= getMoraleMult(attackerMorale);
@@ -192,6 +219,7 @@ function calcDamage(attacker: Unit, defender: Unit, tactic: TacticDef | null, se
   if (attacker.abilityActive && !isCounter && attacker.type === 'armor') atkStat *= 2;
   if (attacker.abilityActive && !isCounter && attacker.type === 'cavalry') atkStat *= 2;
   if (attacker.abilityActive && !isCounter && attacker.type === 'special_forces') atkStat *= 3;
+  if (attacker.abilityActive && !isCounter && attacker.type === 'commando') atkStat *= 2;
   atkStat *= (1 + getWeatherAtkMod(weather));
   let defStat = defender.def * (1 + (tactic?.defMod ?? 0) + (secondary ? (secondary.defMod ?? 0) * 0.5 : 0));
   defStat *= (1 + TERRAIN_DEFS[dTerrain].defBonus);
@@ -219,58 +247,221 @@ function checkPincer(attacker: Unit, defender: Unit): boolean {
 }
 function calcCounterDamage(attacker: Unit, defender: Unit, tactic: TacticDef | null, secondary: TacticDef | null, grid: HexCell[][], weather: WeatherType, aMorale: number, dMorale: number): number {
   if (defender.type === 'artillery' && hexDist(attacker.col, attacker.row, defender.col, defender.row) > 1) return 0;
+  if (defender.range === 0) return 0;
   if (hexDist(attacker.col, attacker.row, defender.col, defender.row) > defender.range) return 0;
   return calcDamage(defender, attacker, tactic, secondary, grid, weather, dMorale, aMorale, true);
 }
-// ==================== MAP GENERATION ====================
-function generateMap(): HexCell[][] {
+// ==================== RNG & MAP GENERATION ====================
+function createRNG() { let s = Date.now(); return () => { s = (s * 16807) % 2147483647; return s / 2147483647; }; }
+function makeGrid(): HexCell[][] {
   const grid: HexCell[][] = [];
-  const rng = (seed: number) => { let s = seed; return () => { s = (s * 16807) % 2147483647; return s / 2147483647; }; };
-  const rand = rng(Date.now());
   for (let c = 0; c < COLS; c++) { grid[c] = []; for (let r = 0; r < ROWS; r++) { grid[c][r] = { col: c, row: r, terrain: 'plains', building: null, buildingOwner: null }; } }
-  let riverCol = 6 + Math.floor(rand() * 2);
-  for (let r = 0; r < ROWS; r++) {
-    grid[riverCol][r].terrain = 'water';
-    if (rand() > 0.6 && riverCol + 1 < COLS) grid[riverCol + 1][r].terrain = 'water';
-    riverCol += rand() > 0.6 ? (rand() > 0.5 ? 1 : -1) : 0;
-    riverCol = Math.max(5, Math.min(8, riverCol));
+  return grid;
+}
+function scatterTerrain(grid: HexCell[][], rand: () => number, terrain: TerrainType, count: number, allowOn: TerrainType[] = ['plains'], clusterChance = 0.5) {
+  for (let i = 0; i < count; i++) {
+    const c = Math.floor(rand() * COLS);
+    const r = Math.floor(rand() * ROWS);
+    if (!allowOn.includes(grid[c][r].terrain)) continue;
+    grid[c][r].terrain = terrain;
+    if (rand() > (1 - clusterChance)) {
+      const ns = getNeighbors(c, r);
+      const [nc, nr] = ns[Math.floor(rand() * ns.length)];
+      if (allowOn.includes(grid[nc]?.[nr]?.terrain)) grid[nc][nr].terrain = terrain;
+    }
   }
-  for (let i = 0; i < 12; i++) { const c = 2 + Math.floor(rand() * (COLS - 4)); const r = Math.floor(rand() * ROWS); if (grid[c][r].terrain !== 'plains') continue; grid[c][r].terrain = 'mountain'; if (rand() > 0.5) { const ns = getNeighbors(c, r); const [nc, nr] = ns[Math.floor(rand() * ns.length)]; if (grid[nc]?.[nr]?.terrain === 'plains') grid[nc][nr].terrain = 'mountain'; } }
-  for (let i = 0; i < 14; i++) { const c = Math.floor(rand() * COLS); const r = Math.floor(rand() * ROWS); if (grid[c][r].terrain !== 'plains') continue; grid[c][r].terrain = 'forest'; if (rand() > 0.4) { const ns = getNeighbors(c, r); const [nc, nr] = ns[Math.floor(rand() * ns.length)]; if (grid[nc]?.[nr]?.terrain === 'plains') grid[nc][nr].terrain = 'forest'; } }
-  for (let i = 0; i < 8; i++) { const c = 2 + Math.floor(rand() * (COLS - 4)); const r = Math.floor(rand() * ROWS); if (grid[c][r].terrain === 'plains') grid[c][r].terrain = 'desert'; }
-  // Place buildings
-  const buildingTypes: BuildingType[] = ['factory', 'hospital', 'fortress', 'tower'];
-  for (const bt of buildingTypes) {
+}
+function placeBuildings(grid: HexCell[][], rand: () => number, types: BuildingType[], forbidden: TerrainType[] = ['water', 'mountain']) {
+  for (const bt of types) {
     for (let attempt = 0; attempt < 50; attempt++) {
       const c = 3 + Math.floor(rand() * (COLS - 6));
       const r = Math.floor(rand() * ROWS);
-      if (grid[c][r].terrain === 'water' || grid[c][r].terrain === 'mountain' || grid[c][r].building) continue;
+      if (forbidden.includes(grid[c][r].terrain) || grid[c][r].building) continue;
       grid[c][r].building = bt;
+      break;
+    }
+  }
+}
+function drawRiver(grid: HexCell[][], rand: () => number, startCol: number) {
+  let rc = startCol;
+  for (let r = 0; r < ROWS; r++) {
+    grid[rc][r].terrain = 'water';
+    if (rand() > 0.6 && rc + 1 < COLS) grid[rc + 1][r].terrain = 'water';
+    rc += rand() > 0.6 ? (rand() > 0.5 ? 1 : -1) : 0;
+    rc = Math.max(2, Math.min(COLS - 2, rc));
+  }
+}
+function generateMapForPreset(preset: MapPreset): HexCell[][] {
+  const rand = createRNG();
+  const grid = makeGrid();
+  switch (preset) {
+    case 'desert_storm': {
+      // Fill mostly desert with oases and ruins
+      for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) grid[c][r].terrain = 'desert';
+      scatterTerrain(grid, rand, 'oasis', 6, ['desert'], 0.7);
+      scatterTerrain(grid, rand, 'ruins', 5, ['desert'], 0.3);
+      scatterTerrain(grid, rand, 'mountain', 4, ['desert'], 0.2);
+      scatterTerrain(grid, rand, 'road', 8, ['desert', 'oasis'], 0.4);
+      scatterTerrain(grid, rand, 'plains', 4, ['desert'], 0.3);
+      placeBuildings(grid, rand, ['factory', 'hospital', 'fortress']);
+      break;
+    }
+    case 'mountain_pass': {
+      for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) grid[c][r].terrain = 'mountain';
+      // Create passes (valleys of plains/forest)
+      for (let r = 2; r <= 4; r++) { grid[3][r].terrain = 'plains'; grid[4][r].terrain = 'plains'; grid[5][r].terrain = 'forest'; }
+      for (let r = 5; r <= 7; r++) { grid[8][r].terrain = 'plains'; grid[9][r].terrain = 'forest'; grid[10][r].terrain = 'plains'; }
+      for (let r = 1; r <= 3; r++) { grid[10][r].terrain = 'plains'; grid[11][r].terrain = 'road'; }
+      scatterTerrain(grid, rand, 'forest', 8, ['mountain'], 0.6);
+      scatterTerrain(grid, rand, 'road', 4, ['plains'], 0.5);
+      placeBuildings(grid, rand, ['fortress', 'hospital', 'tower'], ['water', 'mountain']);
+      // Fortress in a pass
+      grid[5][3].building = 'fortress';
+      break;
+    }
+    case 'island_hopping': {
+      for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) grid[c][r].terrain = 'water';
+      // Create islands (clusters of land)
+      const islandCenters: [number, number][] = [[1, 2], [1, 6], [3, 4], [5, 1], [5, 8], [7, 4], [9, 2], [9, 7], [11, 4], [12, 1], [12, 8]];
+      for (const [ic, ir] of islandCenters) {
+        if (ic < COLS && ir < ROWS) {
+          grid[ic][ir].terrain = 'plains';
+          const ns = getNeighbors(ic, ir);
+          for (const [nc, nr] of ns) { if (nc < COLS && nr < ROWS && rand() > 0.4) grid[nc][nr].terrain = 'plains'; }
+        }
+      }
+      scatterTerrain(grid, rand, 'beach', 8, ['plains'], 0.6);
+      scatterTerrain(grid, rand, 'forest', 5, ['plains'], 0.3);
+      scatterTerrain(grid, rand, 'swamp', 3, ['plains'], 0.2);
+      placeBuildings(grid, rand, ['factory', 'hospital', 'fortress', 'tower'], ['water']);
+      break;
+    }
+    case 'forest_ambush': {
+      for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) grid[c][r].terrain = 'forest';
+      scatterTerrain(grid, rand, 'plains', 8, ['forest'], 0.7);
+      scatterTerrain(grid, rand, 'swamp', 6, ['forest'], 0.5);
+      scatterTerrain(grid, rand, 'road', 4, ['plains', 'forest'], 0.3);
+      scatterTerrain(grid, rand, 'mountain', 3, ['forest'], 0.2);
+      scatterTerrain(grid, rand, 'ruins', 3, ['forest', 'plains'], 0.3);
+      placeBuildings(grid, rand, ['hospital', 'tower', 'fortress']);
+      break;
+    }
+    case 'urban_warfare': {
+      for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) grid[c][r].terrain = 'urban';
+      scatterTerrain(grid, rand, 'road', 12, ['urban'], 0.7);
+      scatterTerrain(grid, rand, 'plains', 4, ['urban'], 0.3);
+      // Parks
+      scatterTerrain(grid, rand, 'forest', 4, ['urban', 'plains'], 0.3);
+      scatterTerrain(grid, rand, 'ruins', 4, ['urban'], 0.3);
+      scatterTerrain(grid, rand, 'swamp', 2, ['urban'], 0.1);
+      placeBuildings(grid, rand, ['factory', 'hospital', 'fortress', 'tower'], ['water']);
+      break;
+    }
+    case 'river_crossing': {
+      for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) grid[c][r].terrain = 'plains';
+      // Large river down the middle
+      drawRiver(grid, rand, 6);
+      // Bridges (road tiles crossing the river)
+      for (let r = 2; r < ROWS; r += 3) { grid[6][r].terrain = 'road'; if (r + 1 < ROWS) grid[6][r + 1].terrain = 'road'; }
+      scatterTerrain(grid, rand, 'urban', 6, ['plains'], 0.4);
+      scatterTerrain(grid, rand, 'forest', 5, ['plains'], 0.4);
+      scatterTerrain(grid, rand, 'mountain', 3, ['plains'], 0.3);
+      placeBuildings(grid, rand, ['fortress', 'factory', 'hospital', 'tower']);
+      // Place fortress on a bridge
+      grid[6][2].building = 'fortress';
+      break;
+    }
+    case 'classic':
+    default: {
+      drawRiver(grid, rand, 6 + Math.floor(rand() * 2));
+      scatterTerrain(grid, rand, 'mountain', 12, ['plains'], 0.5);
+      scatterTerrain(grid, rand, 'forest', 14, ['plains'], 0.4);
+      scatterTerrain(grid, rand, 'desert', 8, ['plains'], 0.3);
+      scatterTerrain(grid, rand, 'urban', 3, ['plains'], 0.2);
+      scatterTerrain(grid, rand, 'road', 4, ['plains'], 0.3);
+      placeBuildings(grid, rand, ['factory', 'hospital', 'fortress', 'tower']);
       break;
     }
   }
   return grid;
 }
+// ==================== UNIT CREATION ====================
 function initRevealed(): boolean[][] { return Array.from({ length: COLS }, () => Array(ROWS).fill(false)); }
 function revealAround(grid: HexCell[][], revealed: boolean[][], col: number, row: number, range: number) {
   for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) { if (hexDist(col, row, c, r) <= range) revealed[c][r] = true; }
-  // Reveal around towers
   for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) { if (grid[c][r].building === 'tower' && revealed[c][r]) revealAround(grid, revealed, c, r, 5); }
 }
 function createUnit(id: number, type: UnitType, owner: Owner, col: number, row: number): Unit {
   const d = UNIT_DEFS[type];
   return { id: `u${id}`, type, owner, hp: d.hp, maxHp: d.hp, atk: d.atk, def: d.def, mov: d.mov, range: d.range, col, row, moved: false, attacked: false, level: 1, isFake: false, fakeTurns: 0, exp: 0, maxExp: 20, abilityCooldownLeft: 0, abilityActive: false, abilityActiveTurns: 0, entrenched: false };
 }
-function createInitialUnits(): Unit[] {
+function findSafeSpawn(grid: HexCell[][], units: Unit[], colRange: [number, number], owner: Owner): [number, number][] {
+  const positions: [number, number][] = [];
+  for (let c = colRange[0]; c <= colRange[1]; c++) {
+    for (let r = 0; r < ROWS; r++) {
+      const t = grid[c][r].terrain;
+      if (t === 'water' || t === 'mountain' || getUnitAt(units, c, r)) continue;
+      positions.push([c, r]);
+    }
+  }
+  return positions;
+}
+function createUnitsForMap(preset: MapPreset): Unit[] {
   let id = 0;
   const p = (t: UnitType, c: number, r: number) => createUnit(id++, t, 'player', c, r);
   const a = (t: UnitType, c: number, r: number) => createUnit(id++, t, 'ai', c, r);
-  return [
-    p('infantry', 0, 1), p('infantry', 0, 4), p('infantry', 0, 7),
-    p('armor', 1, 2), p('artillery', 0, 5), p('special_forces', 1, 8),
-    a('infantry', 13, 2), a('infantry', 13, 5), a('infantry', 13, 8),
-    a('armor', 12, 3), a('artillery', 13, 6), a('special_forces', 12, 0),
-  ];
+  switch (preset) {
+    case 'desert_storm':
+      return [
+        p('cavalry', 0, 1), p('cavalry', 0, 4), p('armor', 0, 7),
+        p('armor', 1, 2), p('scouts', 0, 5), p('missiles', 1, 8),
+        a('cavalry', 13, 2), a('cavalry', 13, 5), a('armor', 13, 8),
+        a('armor', 12, 3), a('scouts', 13, 6), a('missiles', 12, 0),
+      ];
+    case 'mountain_pass':
+      return [
+        p('infantry', 0, 1), p('infantry', 0, 4), p('artillery', 0, 7),
+        p('engineers', 1, 2), p('infantry', 0, 5), p('artillery', 1, 8),
+        a('infantry', 13, 2), a('infantry', 13, 5), a('artillery', 13, 8),
+        a('engineers', 12, 3), a('infantry', 13, 6), a('artillery', 12, 0),
+      ];
+    case 'island_hopping':
+      return [
+        p('marines', 0, 1), p('marines', 0, 4), p('scouts', 0, 7),
+        p('marines', 1, 2), p('scouts', 0, 5), p('armor', 1, 8),
+        a('marines', 13, 2), a('marines', 13, 5), a('scouts', 13, 8),
+        a('marines', 12, 3), a('scouts', 13, 6), a('armor', 12, 0),
+      ];
+    case 'forest_ambush':
+      return [
+        p('special_forces', 0, 1), p('cavalry', 0, 4), p('scouts', 0, 7),
+        p('special_forces', 1, 2), p('cavalry', 0, 5), p('scouts', 1, 8),
+        a('special_forces', 13, 2), a('cavalry', 13, 5), a('scouts', 13, 8),
+        a('special_forces', 12, 3), a('cavalry', 13, 6), a('scouts', 12, 0),
+      ];
+    case 'urban_warfare':
+      return [
+        p('armor', 0, 1), p('infantry', 0, 4), p('medics', 0, 7),
+        p('infantry', 1, 2), p('engineers', 0, 5), p('armor', 1, 8),
+        a('armor', 13, 2), a('infantry', 13, 5), a('medics', 13, 8),
+        a('infantry', 12, 3), a('engineers', 13, 6), a('armor', 12, 0),
+      ];
+    case 'river_crossing':
+      return [
+        p('infantry', 0, 1), p('armor', 0, 4), p('engineers', 0, 7),
+        p('infantry', 1, 2), p('artillery', 0, 5), p('armor', 1, 8),
+        a('infantry', 13, 2), a('armor', 13, 5), a('engineers', 13, 8),
+        a('infantry', 12, 3), a('artillery', 13, 6), a('armor', 12, 0),
+      ];
+    case 'classic':
+    default:
+      return [
+        p('infantry', 0, 1), p('infantry', 0, 4), p('infantry', 0, 7),
+        p('armor', 1, 2), p('artillery', 0, 5), p('special_forces', 1, 8),
+        a('infantry', 13, 2), a('infantry', 13, 5), a('infantry', 13, 8),
+        a('armor', 12, 3), a('artillery', 13, 6), a('special_forces', 12, 0),
+      ];
+  }
 }
 function getWeather(): WeatherType { const r = Math.random(); return r < 0.4 ? 'clear' : r < 0.6 ? 'rain' : r < 0.75 ? 'snow' : r < 0.9 ? 'fog' : 'storm'; }
 // ==================== GAME REDUCER ====================
@@ -286,16 +477,16 @@ const initialState: GameState = {
   damagePreview: null, previousState: null, weather: 'clear', weatherTurnsLeft: 3,
   effects: [], shakeKey: 0,
   achievements: [], playerUsedPincer: 0, playerUsedBlitzkrieg: false, playerUsedGuerrilla: false, playerUsedSiege: false, artilleryKills: 0, playerLostNoUnits: true,
-  showBattleModal: null,
+  showBattleModal: null, mapPreset: 'classic',
 };
 function gameReducer(state: GameState, action: Action): GameState {
   switch (action.type) {
     case 'START_GAME': {
-      const grid = generateMap();
-      const units = createInitialUnits();
+      const grid = generateMapForPreset(action.mapPreset);
+      const units = createUnitsForMap(action.mapPreset);
       const revealed = initRevealed();
-      units.filter(u => u.owner === 'player').forEach(u => revealAround(grid, revealed, u.col, u.row, u.type === 'cavalry' ? 3 : u.type === 'artillery' ? 1 : 2));
-      return { ...initialState, screen: 'playing', phase: 'planning', turn: 1, difficulty: action.difficulty, grid, units, revealed, weather: getWeather(), weatherTurnsLeft: 3, log: [{ turn: 1, msg: '⚔️ بدأت المعركة! اختر تكتيكك الأساسي والثانوي', type: 'system' }] };
+      units.filter(u => u.owner === 'player').forEach(u => revealAround(grid, revealed, u.col, u.row, u.type === 'cavalry' || u.type === 'scouts' ? 3 : u.type === 'artillery' || u.type === 'rocket_artillery' ? 1 : 2));
+      return { ...initialState, screen: 'playing', phase: 'planning', turn: 1, difficulty: action.difficulty, mapPreset: action.mapPreset, grid, units, revealed, weather: getWeather(), weatherTurnsLeft: 3, log: [{ turn: 1, msg: '⚔️ بدأت المعركة! اختر تكتيكك الأساسي والثانوي', type: 'system' }] };
     }
     case 'SET_SCREEN': return { ...state, screen: action.screen };
     case 'SELECT_TACTIC': return action.secondary ? { ...state, secondaryTacticId: action.id } : { ...state, tacticId: action.id };
@@ -328,7 +519,7 @@ function gameReducer(state: GameState, action: Action): GameState {
     case 'CONFIRM_ATTACK': return handleConfirmAttack(state);
     case 'CANCEL_ATTACK': return { ...state, showBattleModal: null };
     case 'AI_TURN_COMPLETE': return handleAIComplete(state);
-    case 'SAVE_GAME': { try { const s = { ...action, state: JSON.parse(JSON.stringify(state)) }; if (typeof window !== 'undefined') localStorage.setItem(`warGame_save_${action.slot}`, JSON.stringify(state)); } catch {} return state; }
+    case 'SAVE_GAME': { try { if (typeof window !== 'undefined') localStorage.setItem(`warGame_save_${action.slot}`, JSON.stringify(state)); } catch {} return state; }
     case 'LOAD_GAME': { try { if (typeof window !== 'undefined') { const d = localStorage.getItem(`warGame_save_${action.slot}`); if (d) return JSON.parse(d); } } catch {} return state; }
     case 'CLEAR_EFFECTS': return { ...state, effects: state.effects.filter(e => Date.now() - e.startTime < 1000) };
     default: return state;
@@ -342,23 +533,22 @@ function handleAbilityUse(state: GameState, unitId: string): GameState {
   const def = UNIT_DEFS[unit.type];
   const log = [...state.log];
   let newUnit = { ...unit };
+  let newUnits = state.units;
   if (unit.type === 'infantry') { newUnit.entrenched = true; newUnit.abilityActive = true; newUnit.abilityActiveTurns = 2; newUnit.abilityCooldownLeft = def.abilityCooldown; log.push({ turn: state.turn, msg: `🏗️ ${def.nameAr} حفر خنادق! +40% دفاع لمدة دورين`, type: 'defense' }); }
   else if (unit.type === 'armor') { newUnit.abilityActive = true; newUnit.abilityActiveTurns = 1; newUnit.abilityCooldownLeft = def.abilityCooldown; log.push({ turn: state.turn, msg: `💥 ${def.nameAr} يجهز صدمة! الهجوم التالي ×2`, type: 'tactic' }); }
   else if (unit.type === 'artillery') {
-    // Barrage: attack all enemies in range 2
     const tactic = TACTICS.find(t => t.id === state.playerTactic);
     const secondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic);
     const enemies = state.units.filter(e => e.owner !== 'player' && !e.isFake && hexDist(unit.col, unit.row, e.col, e.row) <= 2);
-    let newUnits = state.units.map(u => u.id === unitId ? { ...newUnit } : u);
+    newUnits = state.units.map(u => u.id === unitId ? { ...newUnit } : u);
     newUnits[uIdx] = newUnit;
-    let killed = 0;
     for (const e of enemies) {
       const dmg = Math.round(calcDamage(unit, e, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false) * 0.6);
       const eIdx = newUnits.findIndex(u => u.id === e.id);
       if (eIdx >= 0) {
         let hp = newUnits[eIdx].hp - dmg;
         log.push({ turn: state.turn, msg: `💣 قصف مكثف على ${UNIT_DEFS[e.type].nameAr} - ${dmg} ضرر`, type: 'attack' });
-        if (hp <= 0) { killed++; log.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[e.type].nameAr} دُمر!`, type: 'system' }); newUnits = newUnits.filter(u => u.id !== e.id); } else { newUnits[eIdx] = { ...newUnits[eIdx], hp }; }
+        if (hp <= 0) { log.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[e.type].nameAr} دُمر!`, type: 'system' }); newUnits = newUnits.filter(u => u.id !== e.id); } else { newUnits[eIdx] = { ...newUnits[eIdx], hp }; }
       }
     }
     newUnit.abilityCooldownLeft = def.abilityCooldown;
@@ -366,7 +556,71 @@ function handleAbilityUse(state: GameState, unitId: string): GameState {
   }
   else if (unit.type === 'special_forces') { newUnit.abilityActive = true; newUnit.abilityActiveTurns = 1; newUnit.abilityCooldownLeft = def.abilityCooldown; log.push({ turn: state.turn, msg: `🎯 ${def.nameAr} يجهز اغتيال! الهجوم التالي ×3`, type: 'tactic' }); }
   else if (unit.type === 'cavalry') { newUnit.abilityActive = true; newUnit.abilityActiveTurns = 1; newUnit.abilityCooldownLeft = def.abilityCooldown; log.push({ turn: state.turn, msg: `🐎 ${def.nameAr} يجهز هجوم سهم! تحرك+هجوم ×2`, type: 'tactic' }); }
-  const newUnits = state.units.map(u => u.id === unitId ? newUnit : u);
+  // === NEW UNIT ABILITIES ===
+  else if (unit.type === 'medics') {
+    const allies = state.units.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0 && u.id !== unitId && hexDist(unit.col, unit.row, u.col, u.row) <= 2);
+    if (allies.length > 0) {
+      allies.sort((a, b) => (a.hp / a.maxHp) - (b.hp / b.maxHp));
+      const target = allies[0];
+      const tIdx = state.units.findIndex(u => u.id === target.id);
+      const healed = Math.min(40, target.maxHp - target.hp);
+      if (tIdx >= 0 && healed > 0) {
+        newUnits = state.units.map(u => u.id === unitId ? newUnit : u);
+        newUnits = newUnits.map((u, i) => i === tIdx ? { ...u, hp: Math.min(u.maxHp, u.hp + 40) } : u);
+        newUnits[uIdx] = newUnit;
+        log.push({ turn: state.turn, msg: `⚕️ ${def.nameAr} عالج ${UNIT_DEFS[target.type].nameAr} +${healed} HP`, type: 'defense' });
+        newUnit.abilityCooldownLeft = def.abilityCooldown;
+        return { ...state, units: newUnits, log, effects: [...state.effects, { id: `fx_heal_${Date.now()}`, col: target.col, row: target.row, type: 'heal' as const, startTime: Date.now() }] };
+      }
+    }
+    log.push({ turn: state.turn, msg: `⚕️ لا يوجد حلفاء جرحى في النطاق`, type: 'info' });
+    return state;
+  }
+  else if (unit.type === 'engineers') {
+    newUnit.entrenched = true; newUnit.abilityActive = true; newUnit.abilityActiveTurns = 3; newUnit.abilityCooldownLeft = def.abilityCooldown;
+    log.push({ turn: state.turn, msg: `🔧 ${def.nameAr} تحصين! +60% دفاع لمدة 3 أدوار`, type: 'defense' });
+  }
+  else if (unit.type === 'scouts') {
+    const revealed = state.revealed.map(r => [...r]);
+    revealAround(state.grid, revealed, unit.col, unit.row, 6);
+    newUnit.abilityCooldownLeft = def.abilityCooldown;
+    log.push({ turn: state.turn, msg: `🔭 ${def.nameAr} رصد! كشف المنطقة المحيطة بمدى 6`, type: 'info' });
+    newUnits = state.units.map(u => u.id === unitId ? newUnit : u);
+    return { ...state, units: newUnits, log, revealed };
+  }
+  else if (unit.type === 'marines') {
+    newUnit.abilityActive = true; newUnit.abilityActiveTurns = 2; newUnit.abilityCooldownLeft = def.abilityCooldown;
+    log.push({ turn: state.turn, msg: `⚓ ${def.nameAr} إنزال بحري! يمكن التحرك فوق الماء لمدة دورين`, type: 'tactic' });
+  }
+  else if (unit.type === 'rocket_artillery') {
+    const tactic = TACTICS.find(t => t.id === state.playerTactic);
+    const secondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic);
+    const enemies = state.units.filter(e => e.owner !== 'player' && !e.isFake && hexDist(unit.col, unit.row, e.col, e.row) <= 3);
+    newUnits = state.units.map(u => u.id === unitId ? { ...newUnit } : u);
+    newUnits[uIdx] = newUnit;
+    for (const e of enemies) {
+      const dmg = Math.round(calcDamage(unit, e, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false) * 0.5);
+      const eIdx = newUnits.findIndex(u => u.id === e.id);
+      if (eIdx >= 0) {
+        let hp = newUnits[eIdx].hp - dmg;
+        log.push({ turn: state.turn, msg: `🎆 قصف صاروخي على ${UNIT_DEFS[e.type].nameAr} - ${dmg} ضرر`, type: 'attack' });
+        if (hp <= 0) { log.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[e.type].nameAr} دُمر!`, type: 'system' }); newUnits = newUnits.filter(u => u.id !== e.id); } else { newUnits[eIdx] = { ...newUnits[eIdx], hp }; }
+      }
+    }
+    newUnit.abilityCooldownLeft = def.abilityCooldown;
+    return { ...state, units: newUnits, log, effects: [...state.effects, ...enemies.map(e => ({ id: `fx_rocket_${Date.now()}_${e.id}`, col: e.col, row: e.row, type: 'explosion' as const, startTime: Date.now() }))], shakeKey: state.shakeKey + 1 };
+  }
+  else if (unit.type === 'commando') {
+    newUnit.abilityActive = true; newUnit.abilityActiveTurns = 1; newUnit.abilityCooldownLeft = def.abilityCooldown;
+    log.push({ turn: state.turn, msg: `🎯 ${def.nameAr} عملية خاصة! الهجوم التالي ×2 ضرر +يشفي 20 HP`, type: 'tactic' });
+  }
+  else if (unit.type === 'supply_truck') {
+    newUnit.abilityCooldownLeft = def.abilityCooldown;
+    log.push({ turn: state.turn, msg: `🚛 ${def.nameAr} إمداد! +15 إمداد فوري`, type: 'tactic' });
+    newUnits = state.units.map(u => u.id === unitId ? newUnit : u);
+    return { ...state, units: newUnits, log, player: { ...state.player, supply: state.player.supply + 15 } };
+  }
+  newUnits = state.units.map(u => u.id === unitId ? newUnit : u);
   return { ...state, units: newUnits, log };
 }
 function handleConfirmAttack(state: GameState): GameState {
@@ -380,21 +634,24 @@ function handleConfirmAttack(state: GameState): GameState {
   log.push({ turn: state.turn, msg: `⚔️ ${UNIT_DEFS[attacker.type].nameAr} هاجم ${UNIT_DEFS[defender.type].nameAr} - ${dmg} ضرر`, type: 'attack' });
   let pKilled = state.playerUnitsKilled, aKilled = state.aiUnitsKilled;
   let totalDmgDealt = state.totalDamageDealt + dmg, totalDmgReceived = state.totalDamageReceived;
-  // Apply damage to defender
   let defIdx = newUnits.findIndex(u => u.id === defender.id);
   let newHp = defender.hp - dmg;
   if (aiTactic?.special === 'tactical_retreat' && defender.owner === 'ai' && newHp <= 0) { newHp = Math.floor(defender.maxHp * 0.5); log.push({ turn: state.turn, msg: '  ⚡ الانسحاب التكتيكي للعدو!', type: 'defense' }); }
-  if (newHp <= 0) { newUnits = newUnits.filter(u => u.id !== defender.id); if (defender.owner === 'ai') { pKilled++; if (attacker.type === 'artillery') state.artilleryKills++; log.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[defender.type].nameAr} (عدو) دُمر!`, type: 'system' }); } else { aKilled++; state.playerLostNoUnits = false; } } else { newUnits[defIdx] = { ...newUnits[defIdx], hp: newHp }; }
-  // Attacker gains exp
+  if (newHp <= 0) { newUnits = newUnits.filter(u => u.id !== defender.id); if (defender.owner === 'ai') { pKilled++; if (attacker.type === 'artillery' || attacker.type === 'rocket_artillery') state.artilleryKills++; log.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[defender.type].nameAr} (عدو) دُمر!`, type: 'system' }); } else { aKilled++; state.playerLostNoUnits = false; } } else { newUnits[defIdx] = { ...newUnits[defIdx], hp: newHp }; }
   let atkIdx = newUnits.findIndex(u => u.id === attacker.id);
   if (atkIdx >= 0) {
     let au = { ...newUnits[atkIdx] };
     au.exp += 8; if (newHp <= 0) au.exp += 12;
     if (au.exp >= au.maxExp) { au.level++; au.exp = 0; au.maxExp += 10; au.atk += 2; au.def += 1; if (au.level === 3) au.mov += 1; if (au.level === 5) { au.hp = Math.min(au.maxHp, au.hp + 20); } log.push({ turn: state.turn, msg: `  ⬆️ ${UNIT_DEFS[au.type].nameAr} ارتفع للمستوى ${au.level}!`, type: 'info' }); }
     au.attacked = true;
+    // Commando heals after attack when ability active
+    if (au.abilityActive && au.type === 'commando') {
+      au.hp = Math.min(au.maxHp, au.hp + 20);
+      au.abilityActive = false; au.abilityActiveTurns = 0;
+      log.push({ turn: state.turn, msg: `  💚 ${UNIT_DEFS[au.type].nameAr} شُفي +20 HP`, type: 'defense' });
+    }
     if (au.type === 'missiles') { newUnits = newUnits.filter(u => u.id !== au.id); log.push({ turn: state.turn, msg: '  💥 الصواريخ استُهلكت!', type: 'system' }); } else { newUnits[atkIdx] = au; }
   }
-  // Counter-attack
   if (newHp > 0 && counterDmg > 0) {
     log.push({ turn: state.turn, msg: `  🔄 هجوم مضاد: ${UNIT_DEFS[defender.type].nameAr} رد بـ ${counterDmg} ضرر`, type: 'defense' });
     totalDmgReceived += counterDmg;
@@ -405,13 +662,11 @@ function handleConfirmAttack(state: GameState): GameState {
       else { newUnits[atkIdx] = { ...newUnits[atkIdx], hp: aHp }; }
     }
   }
-  state.player.morale = Math.min(100, state.player.morale + (newHp <= 0 ? 5 : 0));
-  state.ai.morale = Math.min(100, state.ai.morale + (aKilled > pKilled ? 3 : 0));
   const aiAlive = newUnits.filter(u => u.owner === 'ai' && !u.isFake && u.hp > 0).length;
   const playerAlive = newUnits.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).length;
   const newEffects = [...state.effects, { id: `fx_${Date.now()}`, col: defender.col, row: defender.row, type: 'attack' as const, startTime: Date.now() }];
   if (newHp <= 0) newEffects.push({ id: `fx2_${Date.now()}`, col: defender.col, row: defender.row, type: 'explosion' as const, startTime: Date.now() });
-  return { ...state, units: newUnits, selectedId: null, validAttacks: [], validMoves: [], log, damagePreview: null, showBattleModal: null, playerUnitsKilled: pKilled, aiUnitsKilled: aKilled, totalDamageDealt: totalDmgDealt, totalDamageReceived: totalDmgReceived, effects: newEffects, shakeKey: attacker.type === 'artillery' || attacker.type === 'missiles' ? state.shakeKey + 1 : state.shakeKey, winner: aiAlive === 0 ? 'player' : playerAlive === 0 ? 'ai' : null, phase: aiAlive === 0 || playerAlive === 0 ? 'ai_turn' : state.phase };
+  return { ...state, units: newUnits, selectedId: null, validAttacks: [], validMoves: [], log, damagePreview: null, showBattleModal: null, playerUnitsKilled: pKilled, aiUnitsKilled: aKilled, totalDamageDealt: totalDmgDealt, totalDamageReceived: totalDmgReceived, effects: newEffects, shakeKey: attacker.type === 'artillery' || attacker.type === 'missiles' || attacker.type === 'rocket_artillery' ? state.shakeKey + 1 : state.shakeKey, winner: aiAlive === 0 ? 'player' : playerAlive === 0 ? 'ai' : null, phase: aiAlive === 0 || playerAlive === 0 ? 'ai_turn' : state.phase };
 }
 function handleHexClick(state: GameState, col: number, row: number): GameState {
   if (state.phase !== 'movement' && state.phase !== 'attack') return state;
@@ -432,7 +687,6 @@ function handleHexClick(state: GameState, col: number, row: number): GameState {
         const prev = JSON.parse(JSON.stringify(state));
         const newUnits = state.units.map(u => u.id === sel.id ? { ...u, col, row, moved: true } : u);
         const attacks = calcValidAttacks({ ...sel, col, row }, newUnits, tactic);
-        // Cavalry with charge ability: can also attack after moving
         return { ...state, units: newUnits, selectedId: sel.id, validMoves: [], validAttacks: attacks, previousState: prev, log: [...state.log, { turn: state.turn, msg: `▸ ${UNIT_DEFS[sel.type].nameAr} تحرك`, type: 'movement' }] };
       }
       if (clicked && clicked.owner === 'player' && !clicked.isFake && !clicked.moved) return { ...state, selectedId: clicked.id, validMoves: calcValidMoves(clicked, state.grid, state.units, tactic, secondary), validAttacks: calcValidAttacks(clicked, state.units, tactic), damagePreview: null };
@@ -481,45 +735,119 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
   units = units.filter(u => !u.isFake || u.fakeTurns > 0).map(u => u.isFake ? { ...u, fakeTurns: u.fakeTurns - 1 } : u);
   const aiUnits = units.filter(u => u.owner === 'ai' && !u.isFake && u.hp > 0);
   const pU = () => units.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0);
-  // Sort: protect artillery (move last), attack first with ranged
+  // Sort with priority values for new units
   const sorted = [...aiUnits].sort((a, b) => {
-    const p: Record<UnitType, number> = { artillery: 0, armor: 1, infantry: 2, special_forces: 3, cavalry: 4, missiles: 5 };
+    const p: Record<string, number> = {
+      rocket_artillery: -2, artillery: -1, supply_truck: 0, armor: 1, infantry: 2,
+      special_forces: 3, cavalry: 4, missiles: 5, engineers: 6, medics: 7,
+      commando: 8, marines: 9, scouts: 10,
+    };
     return (p[a.type] ?? 3) - (p[b.type] ?? 3);
   });
   for (const unit of sorted) {
-    if (unit.hp <= 0) continue;
+    if (unit.hp <= 0 || !units.find(u => u.id === unit.id)) continue;
     const enemies = pU();
     if (enemies.length === 0) break;
+    // Medics: heal wounded allies first
+    if (unit.type === 'medics' && unit.abilityCooldownLeft <= 0) {
+      const allies = units.filter(u => u.owner === 'ai' && !u.isFake && u.hp > 0 && u.id !== unit.id && u.hp < u.maxHp && hexDist(unit.col, unit.row, u.col, u.row) <= 2);
+      if (allies.length > 0) {
+        allies.sort((a, b) => (a.hp / a.maxHp) - (b.hp / b.maxHp));
+        const target = allies[0];
+        const tIdx = units.findIndex(u => u.id === target.id);
+        if (tIdx >= 0) {
+          units[tIdx] = { ...units[tIdx], hp: Math.min(units[tIdx].maxHp, units[tIdx].hp + 40) };
+          const uIdx = units.findIndex(u => u.id === unit.id);
+          if (uIdx >= 0) units[uIdx] = { ...units[uIdx], abilityCooldownLeft: 3 };
+          log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) عالج ${UNIT_DEFS[target.type].nameAr}`, type: 'defense' });
+        }
+        continue;
+      }
+    }
+    // Supply truck: stay safe
+    if (unit.type === 'supply_truck') {
+      if (unit.abilityCooldownLeft <= 0) {
+        ai = { ...ai, supply: ai.supply + 15 };
+        const uIdx = units.findIndex(u => u.id === unit.id);
+        if (uIdx >= 0) units[uIdx] = { ...units[uIdx], abilityCooldownLeft: 3 };
+        log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) إمداد +15`, type: 'tactic' });
+      }
+      // Move away from enemies
+      const moves = calcValidMoves(unit, state.grid, units, aiTactic, null);
+      const retreatMoves = moves.filter(([mc, mr]) => mc > unit.col);
+      if (retreatMoves.length > 0) {
+        const [bc, br] = retreatMoves[Math.floor(Math.random() * retreatMoves.length)];
+        const uidx = units.findIndex(u => u.id === unit.id);
+        if (uidx >= 0) units[uidx] = { ...units[uidx], col: bc, row: br, moved: true };
+      }
+      continue;
+    }
+    // Scouts: move forward to reveal
+    if (unit.type === 'scouts') {
+      const moves = calcValidMoves(unit, state.grid, units, aiTactic, null);
+      if (moves.length > 0) {
+        const forwardMoves = moves.filter(([mc]) => mc < unit.col);
+        if (forwardMoves.length > 0) {
+          const [bc, br] = forwardMoves[Math.floor(Math.random() * forwardMoves.length)];
+          const uidx = units.findIndex(u => u.id === unit.id);
+          if (uidx >= 0) units[uidx] = { ...units[uidx], col: bc, row: br, moved: true };
+          log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) استكشف`, type: 'movement' });
+        }
+      }
+      continue;
+    }
+    // Engineers: fortify near allies
+    if (unit.type === 'engineers') {
+      if (unit.abilityCooldownLeft <= 0) {
+        const uIdx = units.findIndex(u => u.id === unit.id);
+        if (uIdx >= 0) {
+          units[uIdx] = { ...units[uIdx], entrenched: true, abilityActive: true, abilityActiveTurns: 3, abilityCooldownLeft: 4 };
+          log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) تحصين`, type: 'defense' });
+        }
+      }
+      continue;
+    }
     // Wounded retreat
-    if (unit.hp < unit.maxHp * 0.3 && unit.type !== 'artillery') {
+    if (unit.hp < unit.maxHp * 0.3 && unit.type !== 'artillery' && unit.type !== 'rocket_artillery') {
       const moves = calcValidMoves(unit, state.grid, units, aiTactic, null);
       const retreatMoves = moves.filter(([mc, mr]) => mc > unit.col);
       if (retreatMoves.length > 0) { const [bc, br] = retreatMoves[0]; const uidx = units.findIndex(u => u.id === unit.id); if (uidx >= 0) { units[uidx] = { ...units[uidx], col: bc, row: br, moved: true }; log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) انسحب`, type: 'movement' }); } continue; }
     }
-    // Artillery: don't move adjacent to enemies
     const tryAttack = () => {
-      if (unit.attacked) return false;
-      const eTargets = enemies.filter(e => hexDist(unit.col, unit.row, e.col, e.row) <= unit.range + (aiTactic?.special === 'siege' ? 1 : 0));
-      // Focus fire: target weakest
-      eTargets.sort((a, b) => a.hp - b.hp);
+      const currentUnit = units.find(u => u.id === unit.id);
+      if (!currentUnit || currentUnit.attacked) return false;
+      const eTargets = enemies.filter(e => hexDist(currentUnit.col, currentUnit.row, e.col, e.row) <= currentUnit.range + (aiTactic?.special === 'siege' ? 1 : 0));
+      // Commando: target high value units
+      if (currentUnit.type === 'commando') {
+        eTargets.sort((a, b) => UNIT_DEFS[b.type].cost - UNIT_DEFS[a.type].cost);
+      } else {
+        eTargets.sort((a, b) => a.hp - b.hp);
+      }
       for (const target of eTargets) {
-        const dmg = calcDamage(unit, target, aiTactic, null, state.grid, state.weather, ai.morale, state.player.morale, false);
+        const dmg = calcDamage(currentUnit, target, aiTactic, null, state.grid, state.weather, ai.morale, state.player.morale, false);
         const tidx = units.findIndex(u => u.id === target.id);
         if (tidx >= 0) {
           let hp = units[tidx].hp - dmg;
-          log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) هاجم ${UNIT_DEFS[target.type].nameAr} - ${dmg}`, type: 'attack' });
+          log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[currentUnit.type].nameAr} (عدو) هاجم ${UNIT_DEFS[target.type].nameAr} - ${dmg}`, type: 'attack' });
           if (playerTactic?.special === 'tactical_retreat' && hp <= 0 && target.owner === 'player') { hp = Math.floor(target.maxHp * 0.5); log.push({ turn: state.turn, msg: '  ⚡ انسحاب تكتيكي!', type: 'defense' }); }
           units[tidx] = { ...units[tidx], hp };
-          // Counter attack
-          if (hp > 0 && target.range >= hexDist(unit.col, unit.row, target.col, target.row) && target.type !== 'artillery') {
-            const cDmg = calcDamage(target, unit, playerTactic, null, state.grid, state.weather, state.player.morale, ai.morale, true);
-            const uidx2 = units.findIndex(u => u.id === unit.id);
+          if (hp > 0 && target.range >= hexDist(currentUnit.col, currentUnit.row, target.col, target.row) && target.type !== 'artillery' && target.type !== 'rocket_artillery') {
+            const cDmg = calcDamage(target, currentUnit, playerTactic, null, state.grid, state.weather, state.player.morale, ai.morale, true);
+            const uidx2 = units.findIndex(u => u.id === currentUnit.id);
             if (uidx2 >= 0) { units[uidx2] = { ...units[uidx2], hp: Math.max(0, units[uidx2].hp - cDmg) }; }
           }
           if (hp <= 0) { units = units.filter(u => u.id !== target.id); log.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[target.type].nameAr} دُمر!`, type: 'system' }); }
-          const uidx3 = units.findIndex(u => u.id === unit.id);
-          if (uidx3 >= 0) units[uidx3] = { ...units[uidx3], attacked: true };
-          if (unit.type === 'missiles') { units = units.filter(u => u.id !== unit.id); }
+          const uidx3 = units.findIndex(u => u.id === currentUnit.id);
+          if (uidx3 >= 0) {
+            let au = { ...units[uidx3], attacked: true };
+            // Commando ability: activate if available
+            if (currentUnit.type === 'commando' && currentUnit.abilityCooldownLeft <= 0 && !currentUnit.abilityActive) {
+              au.abilityActive = true; au.abilityActiveTurns = 1; au.abilityCooldownLeft = UNIT_DEFS.commando.abilityCooldown;
+              log.push({ turn: state.turn, msg: `  🎯 كوماندوز عدو: عملية خاصة!`, type: 'tactic' });
+            }
+            units[uidx3] = au;
+          }
+          if (currentUnit.type === 'missiles') { units = units.filter(u => u.id !== currentUnit.id); }
           return true;
         }
       }
@@ -535,9 +863,11 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
           const minEd = Math.min(...enemies.map(e => hexDist(mc, mr, e.col, e.row)));
           const t = getTerrainAt(state.grid, mc, mr);
           let score = -minEd * 2 + TERRAIN_DEFS[t].defBonus * 15;
-          if (unit.type === 'artillery') score -= minEd < 2 ? 100 : 0; // Keep artillery back
-          if (unit.type === 'artillery') score += minEd > 2 && minEd <= 4 ? 20 : 0; // Stay in range
-          if (unit.hp < unit.maxHp * 0.5) score += (mc > unit.col ? 10 : -5); // Retreat wounded
+          if (unit.type === 'artillery' || unit.type === 'rocket_artillery') score -= minEd < 2 ? 100 : 0;
+          if (unit.type === 'artillery' || unit.type === 'rocket_artillery') score += (minEd > 2 && minEd <= unit.range) ? 20 : 0;
+          // Marines try to cross water to flank
+          if (unit.type === 'marines') score += (getTerrainAt(state.grid, mc, mr) === 'beach' ? 5 : 0);
+          if (unit.hp < unit.maxHp * 0.5) score += (mc > unit.col ? 10 : -5);
           score += Math.random() * 3;
           if (score > bestScore) { bestScore = score; bestMove = [mc, mr]; }
         }
@@ -550,7 +880,7 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
     }
   }
   // Deploy
-  const deployable: UnitType[] = ['infantry', 'armor', 'artillery', 'cavalry'];
+  const deployable: UnitType[] = ['infantry', 'armor', 'artillery', 'cavalry', 'medics', 'engineers'];
   for (let d = 0; d < 2; d++) {
     if (ai.supply < 10) break;
     const infCount = aiUnits.filter(u => u.type === 'infantry').length;
@@ -577,16 +907,13 @@ function handleAIComplete(state: GameState): GameState {
   let aiSupplyRed = 0;
   if (pTactic?.special === 'attrition') aiSupplyRed += 10;
   if (pTactic?.special === 'scorched_earth') aiSupplyRed += 20;
-  // Level up with training
   const leveled = finalUnits.map(u => {
     if (u.owner === 'ai' && newAi.training >= 20 && u.level < 5) { const nu = { ...u, level: u.level + 1, atk: u.atk + 2, def: u.def + 1 }; if (nu.level === 3) nu.mov += 1; return nu; }
     return u;
   });
-  // Weather change
   let weather = state.weather;
   let wTurnsLeft = state.weatherTurnsLeft - 1;
   if (wTurnsLeft <= 0) { weather = getWeather(); wTurnsLeft = 3; }
-  // Hospital healing
   const healed = leveled.map(u => {
     if (u.hp <= 0 || u.isFake) return u;
     const cell = state.grid[u.col]?.[u.row];
@@ -597,7 +924,6 @@ function handleAIComplete(state: GameState): GameState {
     }
     return u;
   });
-  // Ability cooldowns & active turns
   const updated = healed.map(u => {
     let nu = { ...u };
     if (nu.abilityCooldownLeft > 0 && !nu.abilityActive) nu.abilityCooldownLeft--;
@@ -605,13 +931,11 @@ function handleAIComplete(state: GameState): GameState {
     if (nu.abilityActive && nu.abilityActiveTurns <= 0) { nu.abilityCooldownLeft = UNIT_DEFS[nu.type].abilityCooldown; nu.abilityActive = false; }
     return nu;
   });
-  // Building control
   const buildingUnits = updated.map(u => {
     const cell = state.grid[u.col]?.[u.row];
-    if (cell?.building && cell.buildingOwner !== u.owner) return { ...u }; // Capture is implicit
+    if (cell?.building && cell.buildingOwner !== u.owner) return { ...u };
     return u;
   });
-  // Factory supply bonus
   let pFactoryBonus = 0, aFactoryBonus = 0;
   for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
     const cell = state.grid[c][r];
@@ -621,13 +945,11 @@ function handleAIComplete(state: GameState): GameState {
       if (unit?.owner === 'ai') aFactoryBonus += 5;
     }
   }
-  // Update grid building ownership
   const newGrid = state.grid.map(col => col.map(cell => {
     const u = getUnitAt(buildingUnits, cell.col, cell.row);
     if (u && cell.building) return { ...cell, buildingOwner: u.owner };
     return cell;
   }));
-  // Morale recovery
   let pMorale = state.player.morale;
   let aMorale = state.ai.morale;
   pMorale += pMorale > 50 ? 3 : 5;
@@ -636,23 +958,19 @@ function handleAIComplete(state: GameState): GameState {
   if (weather === 'storm') { pMorale -= 5; aMorale -= 5; }
   pMorale = Math.max(0, Math.min(100, pMorale));
   aMorale = Math.max(0, Math.min(100, aMorale));
-  // Player level up
   const pLeveled = updated.map(u => {
     if (u.owner === 'player' && state.player.training >= 20 && u.level < 5) { const nu = { ...u, level: u.level + 1, atk: u.atk + 2, def: u.def + 1 }; if (nu.level === 3) nu.mov += 1; return nu; }
     return u;
   });
-  // Storm damage
   const stormDmg = weather === 'storm' ? pLeveled.map(u => { if (Math.random() > 0.8 && !u.isFake) return { ...u, hp: Math.max(1, u.hp - 5) }; return u; }) : pLeveled;
-  // Reveal fog
   const revealed = state.revealed.map(r => [...r]);
   const visionRange = weather === 'fog' ? 1 : 2;
-  stormDmg.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).forEach(u => revealAround(newGrid, revealed, u.col, u.row, u.type === 'cavalry' ? visionRange + 1 : u.type === 'artillery' ? Math.max(1, visionRange - 1) : visionRange));
+  stormDmg.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).forEach(u => revealAround(newGrid, revealed, u.col, u.row, u.type === 'cavalry' || u.type === 'scouts' ? visionRange + 1 : u.type === 'artillery' || u.type === 'rocket_artillery' ? Math.max(1, visionRange - 1) : visionRange));
   const aiNewTactic = aiSelectTactic({ ...state, units: stormDmg, turn: newTurn });
   const supplyGain = 10 + pFactoryBonus;
   const aiSupplyGain = 10 + aFactoryBonus + (state.difficulty === 'hard' ? 5 : state.difficulty === 'legendary' ? 10 : 0);
   const nextLog = [...state.log, ...aiLog, { turn: newTurn, msg: `═══ الدور ${newTurn} ═══`, type: 'info' }, { turn: newTurn, msg: `📦 +${supplyGain} إمداد, +5 تدريب | ${WEATHER_NAMES[weather].icon} ${WEATHER_NAMES[weather].name}`, type: 'info' }];
   if (playerSupplyDelta < 0) nextLog.push({ turn: newTurn, msg: `📉 -${Math.abs(playerSupplyDelta)} إمداد (تأثير العدو)`, type: 'tactic' });
-  // Auto-save
   try { if (typeof window !== 'undefined') localStorage.setItem('warGame_auto', JSON.stringify({ ...state, units: stormDmg, grid: newGrid, revealed, turn: newTurn })); } catch {}
   return {
     ...state, units: stormDmg, grid: newGrid, revealed, ai: { ...newAi, supply: Math.max(0, newAi.supply + aiSupplyGain - aiSupplyRed), training: newAi.training >= 20 ? newAi.training - 20 + 5 : newAi.training + 5, morale: aMorale },
@@ -679,6 +997,7 @@ function checkAchievements(state: GameState) {
 }
 // ==================== COMPONENTS ====================
 function MainMenu({ onStart, onHelp, onLoad }: { onStart: (d: Difficulty) => void; onHelp: () => void; onLoad: () => void }) {
+  const [selectedDifficulty, setSelectedDifficulty] = useState<Difficulty | null>(null);
   const difficulties: { key: Difficulty; name: string; desc: string; color: string }[] = [
     { key: 'easy', name: 'جندي', desc: 'سهل - مناسب للمبتدئين', color: '#27ae60' },
     { key: 'normal', name: 'قائد', desc: 'عادي - تحدي متوازن', color: '#f39c12' },
@@ -698,7 +1017,7 @@ function MainMenu({ onStart, onHelp, onLoad }: { onStart: (d: Difficulty) => voi
           <div className="text-white font-bold text-lg mb-2">🎮 اختر مستوى الصعوبة</div>
           <div className="grid grid-cols-2 gap-2 max-w-md mx-auto">
             {difficulties.map(d => (
-              <button key={d.key} onClick={() => onStart(d.key)} className="py-3 px-4 rounded-lg text-white font-bold transition-all hover:scale-105 cursor-pointer border-2" style={{ borderColor: d.color, background: `${d.color}22` }}>
+              <button key={d.key} onClick={() => { setSelectedDifficulty(d.key); onStart(d.key); }} className="py-3 px-4 rounded-lg text-white font-bold transition-all hover:scale-105 cursor-pointer border-2" style={{ borderColor: d.color, background: selectedDifficulty === d.key ? `${d.color}44` : `${d.color}22` }}>
                 <div className="text-lg">{d.name}</div>
                 <div className="text-xs text-gray-300">{d.desc}</div>
               </button>
@@ -710,8 +1029,54 @@ function MainMenu({ onStart, onHelp, onLoad }: { onStart: (d: Difficulty) => voi
           </div>
         </div>
         <div className="mt-4 text-gray-500 text-xs space-y-1">
-          <p>🏰 12 تكتيك عسكري | ⚔️ 6 وحدات | 🗺️ خريطة 14×10 | 🌦️ طقس متغير</p>
-          <p>🏔️ ضباب حرب | 🏗️ مباني | 🎯 هجمات خاصة | 🏆 إنجازات</p>
+          <p>⚔️ 13 وحدة | 🗺️ 7 خرائط | 🏗️ مباني | 🌦️ طقس</p>
+          <p>🏰 12 تكتيك عسكري | 🎯 هجمات خاصة | 🏆 إنجازات</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+function MapSelectScreen({ onSelect, onBack, difficulty }: { onSelect: (preset: MapPreset) => void; onBack: () => void; difficulty: Difficulty }) {
+  const presets: MapPreset[] = ['classic', 'desert_storm', 'mountain_pass', 'island_hopping', 'forest_ambush', 'urban_warfare', 'river_crossing'];
+  const terrainPreview: Record<MapPreset, { colors: string[] }> = {
+    classic: { colors: ['#4a6741', '#1a5276', '#8b7355', '#2d5a27', '#c2a83e'] },
+    desert_storm: { colors: ['#c2a83e', '#48c9b0', '#7f8c8d', '#8b7355', '#8e8e8e'] },
+    mountain_pass: { colors: ['#8b7355', '#2d5a27', '#4a6741', '#8e8e8e', '#4a6741'] },
+    island_hopping: { colors: ['#1a5276', '#4a6741', '#f5cba7', '#2d5a27', '#1a5276'] },
+    forest_ambush: { colors: ['#2d5a27', '#3d5c3a', '#4a6741', '#7f8c8d', '#8e8e8e'] },
+    urban_warfare: { colors: ['#5d6d7e', '#8e8e8e', '#2d5a27', '#7f8c8d', '#3d5c3a'] },
+    river_crossing: { colors: ['#4a6741', '#1a5276', '#8e8e8e', '#5d6d7e', '#2d5a27'] },
+  };
+  return (
+    <div className="min-h-screen p-4 md:p-6 overflow-y-auto" dir="rtl" style={{ background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)' }}>
+      <div className="max-w-4xl mx-auto space-y-4">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold text-white">🗺️ اختر الخريطة</h1>
+          <button onClick={onBack} className="py-2 px-4 rounded-lg bg-gray-700 text-white hover:bg-gray-600 cursor-pointer text-sm">→ رجوع</button>
+        </div>
+        <div className="text-gray-400 text-sm">الصعوبة: {{ easy: 'جندي', normal: 'قائد', hard: 'استراتيجي', legendary: 'أستاذ الحرب' }[difficulty]}</div>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+          {presets.map(preset => {
+            const info = MAP_PRESET_INFO[preset];
+            const preview = terrainPreview[preset];
+            return (
+              <button key={preset} onClick={() => onSelect(preset)} className="rounded-xl p-4 text-right cursor-pointer transition-all hover:scale-105 border-2" style={{ background: '#16213e', borderColor: info.color + '66' }}>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-2xl">{info.icon}</span>
+                  <div>
+                    <div className="text-white font-bold text-sm">{info.name}</div>
+                    <div className="text-gray-400" style={{ fontSize: '10px' }}>{info.difficulty}</div>
+                  </div>
+                </div>
+                <div className="text-gray-300 text-xs mb-3 leading-relaxed">{info.desc}</div>
+                <div className="flex gap-0.5 rounded overflow-hidden h-4">
+                  {preview.colors.map((c, i) => (
+                    <div key={i} className="flex-1" style={{ background: c }} />
+                  ))}
+                </div>
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
@@ -730,9 +1095,28 @@ function HowToPlay({ onBack }: { onBack: () => void }) {
           <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">🏔️ ضباب الحرب</h2><p>لا ترى سوى منطقة حول وحداتك. البرج يكشف مساحة واسعة</p></div>
           <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">🌧️ الطقس</h2><p>يتغير كل 3 أدوار ويؤثر على الحركة والهجوم والمعنويات</p></div>
           <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">🏗️ المباني</h2><p>تحرك إلى المبنى للسيطرة عليه: مصنع (+إمداد) | مستشفى (+شفاء) | حصن (+دفاع) | برج (كشف)</p></div>
-          <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">✂️ نقاط ضعف</h2><p>مشاة&gt;فرسان&gt;مدفعية&gt;دروع&gt;مشاة | قوات خاصة&gt;مدفعية</p></div>
+          <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">✂️ نقاط ضعف</h2><p>مشاة&gt;فرسان&gt;مدفعية&gt;دروع&gt;مشاة | قوات خاصة&gt;مدفعية | كوماندوز&gt;دروع,مدفعية | مشاة بحرية&gt;قوات خاصة | مدفعية صاروخية&gt;دروع,مشاة</p></div>
           <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">⭐ الخبرة القتالية</h2><p>الوحدات تكسب خبرة من القتال وترتفع مستوياتها لتصبح أقوى</p></div>
-          <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">⚡ القدرات الخاصة</h2><p>كل وحدة لديها قدرة فريدة بتهيئة: خنادق | صدمة | قصف مكثف | اغتيال | هجوم سهم</p></div>
+          <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">⚡ القدرات الخاصة</h2>
+            <div className="space-y-1 mt-1">
+              <div>🗡️ مشاة: حفر خنادق (+40% دفاع) | 🛡️ دروع: صدمة (×2 ضرر)</div>
+              <div>💣 مدفعية: قصف مكثف (نطاق 2) | ⚔️ قوات خاصة: اغتيال (×3 ضرر)</div>
+              <div>🐎 فرسان: هجوم سهم (تحرك+×2) | 🚀 صواريخ: هجوم بعيد المدى</div>
+              <div className="text-green-400 font-bold mt-2">🆕 الوحدات الجديدة:</div>
+              <div>⚕️ طبيب ميداني: علاج طارئ (+40 HP لحليف) | 🔧 مهندسين: تحصين (+60% دفاع لمدة 3 أدوار)</div>
+              <div>🔭 مستكشفين: رصد (كشف مدى 6) | ⚓ مشاة بحرية: إنزال بحري (تحرك على الماء)</div>
+              <div>🎆 مدفعية صاروخية: قصف صاروخي (نطاق 3) | 🎯 كوماندوز: عملية خاصة (×2 ضرر+شفاء)</div>
+              <div>🚛 شاحنة إمداد: إمداد (+15 إمداد فوري)</div>
+            </div>
+          </div>
+          <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><h2 className="text-lg font-bold text-yellow-400 mb-1">🗺️ الخرائط</h2>
+            <div className="space-y-1 mt-1">
+              <div>🗺️ كلاسيكي: تضاريس متنوعة | 🏜️ عاصفة الصحراء: فرسان ودروع تتفوق</div>
+              <div>⛰️ ممر جبلي: مشاة ومدفعية | 🏝️ قفز الجزر: مشاة بحرية تتفوق</div>
+              <div>🌲 كمين الغابة: قوات خاصة | 🏙️ حرب المدن: دروع ومهندسين</div>
+              <div>🌊 عبور النهر: سيطرة على الجسور</div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -748,7 +1132,7 @@ function GameOverScreen({ state, onRestart }: { state: GameState; onRestart: () 
         <h1 className="text-3xl font-bold" style={{ color: isWin ? '#53d769' : '#e94560' }}>{isWin ? '🎉 انتصار!' : '💀 هزيمة!'}</h1>
         <div className="text-2xl">{'⭐'.repeat(stars)}{'☆'.repeat(5 - stars)}</div>
         <div className="text-gray-300 text-sm space-y-1">
-          <p>الدور: {state.turn} | الصعوبة: {{ easy: 'جندي', normal: 'قائد', hard: 'استراتيجي', legendary: 'أستاذ' }[state.difficulty]}</p>
+          <p>الدور: {state.turn} | الخريطة: {MAP_PRESET_INFO[state.mapPreset].name} | الصعوبة: {{ easy: 'جندي', normal: 'قائد', hard: 'استراتيجي', legendary: 'أستاذ' }[state.difficulty]}</p>
           <p>وحدات دُمرت: {state.playerUnitsKilled} | وحدات خُسرت: {state.aiUnitsKilled}</p>
           <p>ضرر أُلحق: {state.totalDamageDealt} | ضرر استُقبل: {state.totalDamageReceived}</p>
         </div>
@@ -770,12 +1154,12 @@ function GameHeader({ state, dispatch }: { state: GameState; dispatch: React.Dis
   return (
     <div className="p-2 rounded-lg mb-2 flex flex-wrap items-center justify-between gap-2 text-xs" style={{ background: '#16213e', borderBottom: '2px solid #0f3460' }}>
       <div className="flex items-center gap-3 text-white flex-wrap">
-        <span className="text-yellow-400">📅 الدور <strong>{state.turn}</strong></span>
+        <span className="text-yellow-400">📅 <strong>{state.turn}</strong></span>
         <span className="text-blue-300">{w.icon} {w.name}</span>
         <span>📦 <strong className="text-yellow-400">{state.player.supply}</strong></span>
         <span>💪 <strong className={state.player.morale > 60 ? 'text-green-400' : state.player.morale > 30 ? 'text-yellow-400' : 'text-red-400'}>{state.player.morale}%</strong></span>
         <span>🎖️ <strong className="text-blue-400">{state.player.training}</strong></span>
-        <span className="text-gray-400" style={{ fontSize: '10px' }}>{{ easy: 'جندي', normal: 'قائد', hard: 'استراتيجي', legendary: 'أستاذ' }[state.difficulty]}</span>
+        <span className="text-gray-400" style={{ fontSize: '10px' }}>{MAP_PRESET_INFO[state.mapPreset].icon} {MAP_PRESET_INFO[state.mapPreset].name}</span>
       </div>
       <div className="flex items-center gap-1 flex-wrap">
         <div className="text-gray-300 px-2 py-1 rounded" style={{ background: '#0f3460' }}>{phaseNames[state.phase]}</div>
@@ -799,7 +1183,6 @@ function HexGridComp({ state, dispatch }: { state: GameState; dispatch: React.Di
   const validMoveSet = new Set(state.validMoves.map(([c, r]) => `${c},${r}`));
   const validAttackSet = new Set(state.validAttacks.map(([c, r]) => `${c},${r}`));
   const selected = state.selectedId ? state.units.find(u => u.id === state.selectedId) : null;
-  const fogVisionRange = state.weather === 'fog' ? 1 : 2;
   let dmgPreview: { col: number; row: number; dmg: number; counterDmg: number } | null = null;
   if (state.hoverHex && selected && validAttackSet.has(`${state.hoverHex[0]},${state.hoverHex[1]}`)) {
     const target = getUnitAt(state.units, state.hoverHex[0], state.hoverHex[1]);
@@ -956,11 +1339,11 @@ function TacticSelector({ state, dispatch }: { state: GameState; dispatch: React
       </div>
       <div className="border-t border-gray-700 pt-2">
         <div className="text-white font-bold text-xs mb-1">📦 نشر وحدة</div>
-        <div className="grid grid-cols-3 gap-1">
+        <div className="grid grid-cols-4 gap-1">
           {(Object.keys(UNIT_DEFS) as UnitType[]).map(ut => {
             const d = UNIT_DEFS[ut]; const can = state.player.supply >= d.cost;
             return <button key={ut} onClick={() => can ? dispatch({ type: 'DEPLOY_UNIT', unitType: ut }) : undefined} disabled={!can} className={`p-1 rounded text-center cursor-pointer ${state.deployMode === ut ? 'ring-1 ring-green-400' : ''} ${!can ? 'opacity-40' : 'hover:bg-white/5'}`} style={{ background: '#1a2332' }}>
-              <div style={{ fontSize: '12px' }}>{d.icon}</div><div className="text-gray-300" style={{ fontSize: '8px' }}>{d.nameAr}</div><div className="text-yellow-400" style={{ fontSize: '8px' }}>{d.cost}</div>
+              <div style={{ fontSize: '12px' }}>{d.icon}</div><div className="text-gray-300" style={{ fontSize: '7px' }}>{d.nameAr}</div><div className="text-yellow-400" style={{ fontSize: '7px' }}>{d.cost}</div>
             </button>;
           })}
         </div>
@@ -971,102 +1354,102 @@ function TacticSelector({ state, dispatch }: { state: GameState; dispatch: React
 }
 function UnitCardPanel({ state, dispatch }: { state: GameState; dispatch: React.Dispatch<Action> }) {
   const unit = state.selectedId ? state.units.find(u => u.id === state.selectedId) : null;
-  if (!unit) return <div className="p-3 rounded-lg text-center text-gray-500 text-xs" style={{ background: '#1a2332' }}><div className="text-2xl mb-1">⚔️</div><p>اختر وحدة</p></div>;
-  const def = UNIT_DEFS[unit.type]; const terrain = TERRAIN_DEFS[getTerrainAt(state.grid, unit.col, unit.row)];
-  const hpPct = (unit.hp / unit.maxHp) * 100; const hpColor = hpPct > 50 ? '#2ecc71' : hpPct > 25 ? '#f39c12' : '#e74c3c';
-  const cell = state.grid[unit.col]?.[unit.row]; const bldg = cell?.building ? BUILDING_DEFS[cell.building] : null;
+  if (!unit) return <div className="p-2 rounded-lg text-gray-500 text-xs text-center" style={{ background: '#16213e' }}>اختر وحدة</div>;
+  const def = UNIT_DEFS[unit.type];
+  const hpPct = unit.hp / unit.maxHp;
+  const canUseAbility = unit.owner === 'player' && unit.abilityCooldownLeft <= 0 && !unit.abilityActive && def.abilityCooldown > 0 && (state.phase === 'movement' || state.phase === 'attack');
   return (
-    <div className="p-3 rounded-lg" style={{ background: '#1a2332' }}>
-      <div className="flex items-center gap-2 mb-2">
-        <div className="text-2xl">{def.icon}</div>
-        <div><div className="text-white font-bold text-sm">{def.nameAr} {unit.isFake ? '(وهمية)' : ''} ⭐{unit.level}</div><div className="text-xs" style={{ color: unit.owner === 'player' ? '#53d769' : '#e94560' }}>{unit.owner === 'player' ? '🔹 وحدتك' : '🔸 العدو'}</div></div>
+    <div className="p-3 rounded-lg space-y-2" style={{ background: '#16213e', border: `1px solid ${unit.owner === 'player' ? '#27ae60' : '#c0392b'}` }}>
+      <div className="flex items-center gap-2">
+        <span className="text-2xl">{def.icon}</span>
+        <div>
+          <div className="font-bold text-white text-sm">{def.nameAr} <span className="text-xs text-gray-400">⭐{unit.level}</span></div>
+          <div className="text-xs" style={{ color: unit.owner === 'player' ? '#53d769' : '#e94560' }}>{unit.owner === 'player' ? 'أنت' : 'عدو'}</div>
+        </div>
       </div>
-      <div className="mb-2"><div className="flex justify-between text-xs text-gray-400 mb-0.5"><span>صحة</span><span>{unit.hp}/{unit.maxHp}</span></div><div className="h-2 rounded-full" style={{ background: '#333' }}><div className="h-2 rounded-full transition-all" style={{ width: `${hpPct}%`, background: hpColor }} /></div></div>
-      {unit.owner === 'player' && unit.level < 5 && <div className="mb-1"><div className="flex justify-between text-xs text-gray-500 mb-0.5"><span>خبرة</span><span>{unit.exp}/{unit.maxExp}</span></div><div className="h-1 rounded-full" style={{ background: '#222' }}><div className="h-1 rounded-full bg-purple-400" style={{ width: `${(unit.exp / unit.maxExp) * 100}%` }} /></div></div>}
-      <div className="grid grid-cols-2 gap-1 text-xs mb-2">
-        {[{ l: 'هجوم', v: unit.atk, i: '⚔️', c: '#e94560' }, { l: 'دفاع', v: unit.def + (unit.entrenched ? Math.round(unit.def * 0.4) : 0), i: '🛡️', c: '#3498db' }, { l: 'حركة', v: unit.mov, i: '🚶', c: '#2ecc71' }, { l: 'مدى', v: unit.range, i: '🎯', c: '#f39c12' }].map(s => (
-          <div key={s.l} className="flex items-center gap-1 p-1 rounded" style={{ background: '#0d1117' }}><span>{s.i}</span><span className="text-gray-400">{s.l}:</span><span className="font-bold" style={{ color: s.c }}>{s.v}</span></div>
-        ))}
+      <div>
+        <div className="text-xs text-gray-400 mb-1">HP: {unit.hp}/{unit.maxHp}</div>
+        <div className="w-full h-2 rounded-full bg-gray-700"><div className="h-2 rounded-full transition-all" style={{ width: `${hpPct * 100}%`, background: hpPct > 0.5 ? '#2ecc71' : hpPct > 0.25 ? '#f39c12' : '#e74c3c' }} /></div>
       </div>
-      {unit.entrenched && <div className="text-yellow-400 text-xs mb-1">🏗️ محصّن (+40% دفاع)</div>}
-      {def.counters.length > 0 && <div className="text-green-400 text-xs mb-1">✂️ متفوق على: {def.counters.map(c => UNIT_DEFS[c].nameAr).join(', ')}</div>}
-      {bldg && <div className="text-yellow-400 text-xs mb-1">{bldg.icon} {bldg.nameAr}</div>}
-      <div className="text-xs text-gray-400 mb-1">📍 {terrain.icon} {terrain.nameAr}</div>
-      {unit.owner === 'player' && unit.type !== 'missiles' && (state.phase === 'movement' || state.phase === 'attack') && (
-        <button onClick={() => dispatch({ type: 'USE_ABILITY', unitId: unit.id })} disabled={unit.abilityCooldownLeft > 0 || unit.abilityActive} className="w-full py-1.5 rounded text-xs font-bold cursor-pointer disabled:opacity-30 mt-1" style={{ background: unit.abilityCooldownLeft > 0 ? '#333' : 'linear-gradient(135deg, #9b59b6, #8e44ad)' }}>
-          {unit.abilityCooldownLeft > 0 ? `⏳ ${def.abilityNameAr} (${unit.abilityCooldownLeft} أدوار)` : unit.abilityActive ? `⚡ ${def.abilityNameAr} نشط!` : `⚡ ${def.abilityNameAr}`}
+      <div className="grid grid-cols-4 gap-1 text-xs text-center">
+        <div className="p-1 rounded" style={{ background: '#0d1117' }}><div className="text-gray-400">⚔️</div><div className="text-white font-bold">{unit.atk}</div></div>
+        <div className="p-1 rounded" style={{ background: '#0d1117' }}><div className="text-gray-400">🛡️</div><div className="text-white font-bold">{unit.def}</div></div>
+        <div className="p-1 rounded" style={{ background: '#0d1117' }}><div className="text-gray-400">🚶</div><div className="text-white font-bold">{unit.mov}</div></div>
+        <div className="p-1 rounded" style={{ background: '#0d1117' }}><div className="text-gray-400">🎯</div><div className="text-white font-bold">{unit.range}</div></div>
+      </div>
+      <div className="text-xs space-y-1">
+        <div>🎖️ الخبرة: {unit.exp}/{unit.maxExp}</div>
+        {def.counters.length > 0 && <div className="text-green-400">✂️ يتفوق على: {def.counters.map(c => UNIT_DEFS[c].nameAr).join(', ')}</div>}
+        {unit.entrenched && <div className="text-yellow-400">🏗️ محصّن (+{unit.type === 'engineers' ? 60 : 40}% دفاع)</div>}
+        {unit.abilityActive && <div className="text-red-400">⚡ {def.abilityNameAr} نشطة ({unit.abilityActiveTurns} أدوار)</div>}
+      </div>
+      {canUseAbility && (
+        <button onClick={() => dispatch({ type: 'USE_ABILITY', unitId: unit.id })} className="w-full py-2 rounded-lg text-xs font-bold text-white cursor-pointer" style={{ background: 'linear-gradient(135deg, #f39c12, #e67e22)' }}>
+          {def.abilityNameAr}: {def.abilityDesc}
         </button>
       )}
+      {unit.abilityCooldownLeft > 0 && <div className="text-xs text-gray-400 text-center">⏳ إعادة تحميل: {unit.abilityCooldownLeft} أدوار</div>}
     </div>
   );
 }
-function ArmyOverview({ state }: { state: GameState }) {
-  const pU = state.units.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0);
-  const aU = state.units.filter(u => u.owner === 'ai' && !u.isFake && u.hp > 0);
+function GameLog({ state }: { state: GameState }) {
+  const logRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [state.log.length]);
   return (
-    <div className="space-y-2">
-      <div className="text-white font-bold text-xs">📋 الجيوش</div>
-      <div className="grid grid-cols-2 gap-2">
-        <div className="p-2 rounded" style={{ background: '#1a2332' }}>
-          <div className="text-green-400 font-bold text-xs mb-1">🔹 جيشك ({pU.length})</div>
-          {pU.map(u => { const hp = (u.hp / u.maxHp) * 100; return <div key={u.id} className="flex items-center gap-1 text-xs"><span style={{ fontSize: '10px' }}>{UNIT_DEFS[u.type].icon}</span><div className="flex-1 h-1 rounded" style={{ background: '#333' }}><div className="h-1 rounded" style={{ width: `${hp}%`, background: hp > 50 ? '#2ecc71' : '#e74c3c' }} /></div></div>; })}
-        </div>
-        <div className="p-2 rounded" style={{ background: '#1a2332' }}>
-          <div className="text-red-400 font-bold text-xs mb-1">🔸 العدو ({aU.length})</div>
-          {aU.map(u => { const hp = (u.hp / u.maxHp) * 100; return <div key={u.id} className="flex items-center gap-1 text-xs"><span style={{ fontSize: '10px' }}>{UNIT_DEFS[u.type].icon}</span><div className="flex-1 h-1 rounded" style={{ background: '#333' }}><div className="h-1 rounded" style={{ width: `${hp}%`, background: hp > 50 ? '#e74c3c' : '#c0392b' }} /></div></div>; })}
-        </div>
+    <div className="rounded-lg p-2" style={{ background: '#16213e', maxHeight: '20vh' }}>
+      <div className="text-white text-xs font-bold mb-1">📜 سجل الأحداث</div>
+      <div ref={logRef} className="space-y-0.5 overflow-y-auto max-h-48 text-xs">
+        {state.log.slice(-30).reverse().map((entry, i) => (
+          <div key={i} className="text-gray-300 leading-tight" style={{ opacity: 1 - i * 0.02 }}>
+            {entry.msg}
+          </div>
+        ))}
       </div>
     </div>
   );
 }
-function BattleLog({ entries }: { entries: LogEntry[] }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [entries]);
-  const c: Record<LogType, string> = { info: '#94a3b8', attack: '#e94560', defense: '#3498db', tactic: '#f39c12', movement: '#2ecc71', system: '#9b59b6', weather: '#87ceeb', achievement: '#ffd700' };
-  return <div ref={ref} className="max-h-32 overflow-y-auto rounded-lg p-2 space-y-0.5" style={{ background: '#0d1117', border: '1px solid #1e3a5f', scrollbarWidth: 'thin' }}>{entries.slice(-40).map((e, i) => <div key={i} className="text-xs" style={{ color: c[e.type] }}><span className="text-gray-600">[{e.turn}]</span> {e.msg}</div>)}</div>;
-}
-function ActiveTacticDisplay({ state }: { state: GameState }) {
-  if (state.phase === 'planning') return null;
-  const t = TACTICS.find(t => t.id === state.playerTactic);
-  const s = TACTICS.find(t => t.id === state.secondaryPlayerTactic);
-  if (!t) return null;
-  return (
-    <div className="p-2 rounded-lg" style={{ background: 'linear-gradient(135deg, #0f3460, #16213e)', border: '1px solid #1e3a5f' }}>
-      <div className="text-yellow-400 font-bold text-xs">🎯 التكتيك النشط</div>
-      <div className="text-white font-bold text-sm">{t.name}</div>
-      <div className="text-gray-300" style={{ fontSize: '10px' }}>{t.desc}</div>
-      {s && <div className="text-gray-400 mt-1" style={{ fontSize: '10px' }}>🔧 {s.name} (50%)</div>}
-      <div className="text-gray-500 italic" style={{ fontSize: '9px' }}>📖 {t.ref}</div>
-    </div>
-  );
-}
-// ==================== MAIN PAGE ====================
-export default function Home() {
+// ==================== MAIN EXPORT ====================
+export default function WarGame() {
   const [state, dispatch] = useReducer(gameReducer, initialState);
-  useEffect(() => { if (state.phase === 'ai_turn' && state.animating) { const t = setTimeout(() => dispatch({ type: 'AI_TURN_COMPLETE' }), 1500); return () => clearTimeout(t); } }, [state.phase, state.animating]);
-  useEffect(() => { if (state.effects.length > 0) { const t = setTimeout(() => dispatch({ type: 'CLEAR_EFFECTS' }), 1000); return () => clearTimeout(t); } }, [state.effects.length]);
-  const handleLoad = useCallback(() => { try { if (typeof window !== 'undefined') { const d = localStorage.getItem('warGame_auto'); if (d) { const s = JSON.parse(d); dispatch({ type: 'LOAD_GAME', slot: 0 }); } } } catch {} }, []);
-  const startGame = useCallback((d: Difficulty) => dispatch({ type: 'START_GAME', difficulty: d }), []);
-  if (state.screen === 'menu') return <MainMenu onStart={startGame} onHelp={() => dispatch({ type: 'SET_SCREEN', screen: 'how_to_play' })} onLoad={handleLoad} />;
+  const [pendingDifficulty, setPendingDifficulty] = useState<Difficulty>('normal');
+  const effectTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    effectTimer.current = setInterval(() => { if (state.effects.length > 0) dispatch({ type: 'CLEAR_EFFECTS' }); }, 500);
+    return () => { if (effectTimer.current) clearInterval(effectTimer.current); };
+  }, [state.effects.length]);
+  useEffect(() => {
+    if (state.phase === 'ai_turn' && state.animating) {
+      const timer = setTimeout(() => dispatch({ type: 'AI_TURN_COMPLETE' }), 1200);
+      return () => clearTimeout(timer);
+    }
+  }, [state.phase, state.animating]);
+  if (state.screen === 'menu') return <MainMenu onStart={(d) => { setPendingDifficulty(d); dispatch({ type: 'SET_SCREEN', screen: 'map_select' }); }} onHelp={() => dispatch({ type: 'SET_SCREEN', screen: 'how_to_play' })} onLoad={() => dispatch({ type: 'LOAD_GAME', slot: 0 })} />;
+  if (state.screen === 'map_select') return <MapSelectScreen onSelect={(preset) => dispatch({ type: 'START_GAME', difficulty: pendingDifficulty, mapPreset: preset })} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} difficulty={pendingDifficulty} />;
   if (state.screen === 'how_to_play') return <HowToPlay onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} />;
   if (state.screen === 'game_over') return <GameOverScreen state={state} onRestart={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} />;
   return (
-    <div className="min-h-screen p-2" dir="rtl" style={{ background: 'linear-gradient(180deg, #1a1a2e 0%, #0d1117 100%)' }}>
-      <div className="max-w-7xl mx-auto">
-        <GameHeader state={state} dispatch={dispatch} />
-        <div className="flex gap-2 flex-col lg:flex-row">
-          <div className="flex-1 min-w-0"><HexGridComp state={state} dispatch={dispatch} /></div>
-          <div className="w-full lg:w-64 space-y-2">
-            {state.phase === 'planning' ? <TacticSelector state={state} dispatch={dispatch} /> : <><ActiveTacticDisplay state={state} /><UnitCardPanel state={state} dispatch={dispatch} /><ArmyOverview state={state} /></>}
+    <div className="min-h-screen p-2 md:p-3" dir="rtl" style={{ background: '#0d1117' }}>
+      <GameHeader state={state} dispatch={dispatch} />
+      <div className="flex flex-col lg:flex-row gap-2">
+        <div className="flex-1">
+          <HexGridComp state={state} dispatch={dispatch} />
+          <div className="mt-2">
+            <GameLog state={state} />
           </div>
         </div>
-        <div className="mt-2"><BattleLog entries={state.log} /></div>
+        <div className="w-full lg:w-64 space-y-2">
+          {state.phase === 'planning' ? <TacticSelector state={state} dispatch={dispatch} /> : <UnitCardPanel state={state} dispatch={dispatch} />}
+          <div className="p-2 rounded-lg text-xs" style={{ background: '#16213e' }}>
+            <div className="text-white font-bold mb-1">📊 ملخص</div>
+            <div className="text-gray-300 space-y-0.5">
+              <div>🏆 وحداتك: {state.units.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).length}</div>
+              <div>💀 أعداء: {state.units.filter(u => u.owner === 'ai' && !u.isFake && u.hp > 0).length}</div>
+              <div>📦 إمداد عدو: ~{state.ai.supply}</div>
+            </div>
+          </div>
+        </div>
       </div>
       <BattleModal state={state} dispatch={dispatch} />
-      <style>{`
-        @keyframes shake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
-        .animate-shake { animation: shake 0.3s ease-in-out; }
-      `}</style>
     </div>
   );
 }
