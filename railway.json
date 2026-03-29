@@ -1,0 +1,5 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": "bun run build",
+  "deploy": ["bun", ".next/standalone/server.js"]
+}

@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: strategic-war-game
+    runtime: docker
+    plan: free
+    region: frankfurt
