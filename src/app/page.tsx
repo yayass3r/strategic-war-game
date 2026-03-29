@@ -47,6 +47,7 @@ interface GameState {
   playerBuildCount: number;
   playerDeployCount: number;
   strategicPointsCaptured: number;
+  showStats: boolean;
 }
 type Action =
   | { type: 'START_GAME'; difficulty: Difficulty; mapPreset: MapPreset }
@@ -68,7 +69,9 @@ type Action =
   | { type: 'CLEAR_EFFECTS' }
   | { type: 'ENTER_BUILD_MODE'; buildingType: BuildingType }
   | { type: 'BUILD_BUILDING'; col: number; row: number }
-  | { type: 'CANCEL_BUILD' };
+  | { type: 'CANCEL_BUILD' }
+  | { type: 'RETREAT_UNIT' }
+  | { type: 'TOGGLE_STATS' };
 // ==================== CONSTANTS ====================
 const COLS = 14, ROWS = 10, HEX_SIZE = 24;
 const SQRT3 = Math.sqrt(3);
@@ -338,6 +341,53 @@ function calcCounterDamage(attacker: Unit, defender: Unit, tactic: TacticDef | n
   if (defender.range === 0) return 0;
   if (hexDist(attacker.col, attacker.row, defender.col, defender.row) > defender.range) return 0;
   return calcDamage(defender, attacker, tactic, secondary, grid, weather, dMorale, aMorale, true);
+}
+// ==================== BATTLE FEATURES ====================
+function critChance(type: UnitType): number {
+  const map: Partial<Record<UnitType, number>> = {
+    special_forces: 0.15, commando: 0.15, cavalry: 0.12,
+    artillery: 0.05, rocket_artillery: 0.05,
+    armor: 0.08, marines: 0.08,
+  };
+  return map[type] ?? 0.10;
+}
+function missChance(type: UnitType): number {
+  const map: Partial<Record<UnitType, number>> = {
+    artillery: 0.05, rocket_artillery: 0.05,
+  };
+  return map[type] ?? 0.10;
+}
+function getAdjacentAllies(unit: Unit, units: Unit[]): Set<UnitType> {
+  const types = new Set<UnitType>();
+  for (const [nc, nr] of getNeighbors(unit.col, unit.row)) {
+    const u = getUnitAt(units, nc, nr);
+    if (u && u.owner === unit.owner && !u.isFake && u.hp > 0 && u.id !== unit.id) types.add(u.type);
+  }
+  return types;
+}
+function checkCombineArms(attacker: Unit, units: Unit[]): boolean {
+  const allies = getAdjacentAllies(attacker, units);
+  allies.add(attacker.type);
+  return allies.size >= 3;
+}
+function isFlanking(attacker: Unit, defender: Unit, units: Unit[]): boolean {
+  const defenderNeighbors = getNeighbors(defender.col, defender.row);
+  const attackerAlliesNearDefender = defenderNeighbors.filter(([c, r]) => {
+    const u = getUnitAt(units, c, r);
+    return u && u.owner === attacker.owner && !u.isFake && u.hp > 0;
+  }).length;
+  return attackerAlliesNearDefender >= 2;
+}
+function getMoraleEvent(): { msg: string; playerEffect: number; aiEffect: number } | null {
+  if (Math.random() > 0.15) return null;
+  const events = [
+    { msg: '📣 خطاب تحفيزي! +10 معنويات', playerEffect: 10, aiEffect: 10 },
+    { msg: '😱 شائعات! -5 معنويات', playerEffect: -5, aiEffect: -5 },
+    { msg: '🎯 قائد ميدان رائع! +15 معنويات لفريق واحد', playerEffect: 15, aiEffect: -5 },
+    { msg: '🌧️ أحوال الطقس سيئة! -8 معنويات', playerEffect: -8, aiEffect: -8 },
+    { msg: '🎵 أغنية حرب! +8 معنويات', playerEffect: 8, aiEffect: 8 },
+  ];
+  return events[Math.floor(Math.random() * events.length)];
 }
 function calcBuildPlacements(state: GameState): [number, number][] {
   const placements: [number, number][] = [];
@@ -637,6 +687,7 @@ const initialState: GameState = {
   showBattleModal: null, mapPreset: 'classic',
   buildMode: null, validBuildPlacements: [], playerBuildCount: 0, playerDeployCount: 0,
   strategicPointsCaptured: 0,
+  showStats: false,
 };
 function gameReducer(state: GameState, action: Action): GameState {
   switch (action.type) {
@@ -734,6 +785,31 @@ function gameReducer(state: GameState, action: Action): GameState {
       };
     }
     case 'CANCEL_BUILD': return { ...state, buildMode: null, validBuildPlacements: [] };
+    case 'TOGGLE_STATS': return { ...state, showStats: !state.showStats };
+    case 'RETREAT_UNIT': {
+      if (!state.selectedId || state.phase !== 'attack') return state;
+      const rUnit = state.units.find(u => u.id === state.selectedId);
+      if (!rUnit || rUnit.owner !== 'player' || rUnit.attacked) return state;
+      const rTactic = TACTICS.find(t => t.id === state.playerTactic);
+      const rSecondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic);
+      const enemies = state.units.filter(u => u.owner === 'ai' && !u.isFake && u.hp > 0);
+      if (enemies.length === 0) return state;
+      const moves = calcValidMoves(rUnit, state.grid, state.units, rTactic, rSecondary);
+      const retreatMoves = moves.filter(([mc, mr]) => {
+        const nearestEnemyDist = Math.min(...enemies.map(e => hexDist(mc, mr, e.col, e.row)));
+        const currentDist = Math.min(...enemies.map(e => hexDist(rUnit.col, rUnit.row, e.col, e.row)));
+        return nearestEnemyDist > currentDist;
+      });
+      if (retreatMoves.length === 0) return state;
+      retreatMoves.sort((a, b) => {
+        const aDist = Math.min(...enemies.map(e => hexDist(a[0], a[1], e.col, e.row)));
+        const bDist = Math.min(...enemies.map(e => hexDist(b[0], b[1], e.col, e.row)));
+        return bDist - aDist;
+      });
+      const [nc, nr] = retreatMoves[0];
+      const newRUnits = state.units.map(u => u.id === rUnit.id ? { ...u, col: nc, row: nr, moved: true, attacked: true } : u);
+      return { ...state, units: newRUnits, selectedId: null, validMoves: [], validAttacks: [], log: [...state.log, { turn: state.turn, msg: `↩️ ${UNIT_DEFS[rUnit.type].nameAr} انسحب`, type: 'movement' as const }] };
+    }
     default: return state;
   }
 }
@@ -843,21 +919,74 @@ function handleConfirmAttack(state: GameState): GameState {
   const aiTactic = TACTICS.find(t => t.id === state.aiTactic);
   let newUnits = state.units.map(u => ({ ...u }));
   const log = [...state.log];
-  log.push({ turn: state.turn, msg: `⚔️ ${UNIT_DEFS[attacker.type].nameAr} هاجم ${UNIT_DEFS[defender.type].nameAr} - ${dmg} ضرر`, type: 'attack' });
+  // Feature 1: Crit/miss system
+  let finalDmg = dmg;
+  let crit = false;
+  let miss = false;
+  if (Math.random() < missChance(attacker.type)) { miss = true; finalDmg = 0; }
+  else if (Math.random() < critChance(attacker.type)) { crit = true; finalDmg = Math.round(finalDmg * 1.5); }
+  // Feature 2: Combine arms bonus
+  let combineArms = false;
+  if (!miss && checkCombineArms(attacker, state.units)) { combineArms = true; finalDmg = Math.round(finalDmg * 1.2); }
+  // Feature 3: Flanking bonus
+  let flanking = false;
+  if (!miss && isFlanking(attacker, defender, state.units)) { flanking = true; finalDmg = Math.round(finalDmg * 1.25); }
+  // Build log message
+  let atkMsg = `⚔️ ${UNIT_DEFS[attacker.type].nameAr} هاجم ${UNIT_DEFS[defender.type].nameAr} - ${finalDmg} ضرر`;
+  if (miss) atkMsg += ' 💨 أخطأ!';
+  else if (crit) atkMsg += ' 💥 ضربة حرجة!';
+  if (combineArms) atkMsg += ' 🔗 أسلحة مشتركة!';
+  if (flanking) atkMsg += ' 🗡️ هجوم من الجنب!';
+  log.push({ turn: state.turn, msg: atkMsg, type: 'attack' });
   let pKilled = state.playerUnitsKilled, aKilled = state.aiUnitsKilled;
   let artilleryKills = state.artilleryKills;
   let playerLostNoUnits = state.playerLostNoUnits;
-  let totalDmgDealt = state.totalDamageDealt + dmg, totalDmgReceived = state.totalDamageReceived;
+  let totalDmgDealt = state.totalDamageDealt + finalDmg, totalDmgReceived = state.totalDamageReceived;
   let defIdx = newUnits.findIndex(u => u.id === defender.id);
-  let newHp = defender.hp - dmg;
+  let newHp = defender.hp - finalDmg;
+  // Feature 6: Terrain destruction - track grid changes
+  let newGrid = state.grid;
   if (aiTactic?.special === 'tactical_retreat' && defender.owner === 'ai' && newHp <= 0) { newHp = Math.floor(defender.maxHp * 0.5); log.push({ turn: state.turn, msg: '  ⚡ الانسحاب التكتيكي للعدو!', type: 'defense' }); }
   if (newHp <= 0) { newUnits = newUnits.filter(u => u.id !== defender.id); if (defender.owner === 'ai') { pKilled++; if (attacker.type === 'artillery' || attacker.type === 'rocket_artillery') artilleryKills++; log.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[defender.type].nameAr} (عدو) دُمر!`, type: 'system' }); // Combat loot: 20% chance for bonus supply
       if (Math.random() < 0.2) { const lootAmt = 5 + Math.floor(Math.random() * 6); log.push({ turn: state.turn, msg: `  💰 غنائم! +${lootAmt} إمداد`, type: 'system' }); } } else { aKilled++; playerLostNoUnits = false; } } else { newUnits[defIdx] = { ...newUnits[defIdx], hp: newHp }; }
+  // Feature 6: Terrain destruction by artillery
+  if (newHp > 0 && (attacker.type === 'artillery' || attacker.type === 'rocket_artillery' || attacker.type === 'missiles')) {
+    const dTerrain = state.grid[defender.col]?.[defender.row]?.terrain;
+    if (dTerrain) {
+      let destroyed = false;
+      let newTerrain: TerrainType = dTerrain;
+      if (dTerrain === 'urban' && Math.random() < 0.4) { newTerrain = 'ruins'; destroyed = true; }
+      else if (dTerrain === 'forest' && Math.random() < 0.5) { newTerrain = 'plains'; destroyed = true; }
+      else if (dTerrain === 'road' && Math.random() < 0.3) { newTerrain = 'plains'; destroyed = true; }
+      if (destroyed) {
+        newGrid = state.grid.map(col => col.map(cell =>
+          cell.col === defender.col && cell.row === defender.row
+            ? { ...cell, terrain: newTerrain }
+            : cell
+        ));
+        log.push({ turn: state.turn, msg: `  🏚️ تدمير التضاريس: ${TERRAIN_DEFS[dTerrain].nameAr} → ${TERRAIN_DEFS[newTerrain].nameAr}`, type: 'system' });
+      }
+    }
+  }
   let atkIdx = newUnits.findIndex(u => u.id === attacker.id);
   if (atkIdx >= 0) {
     let au = { ...newUnits[atkIdx] };
     au.exp += 8; if (newHp <= 0) au.exp += 12;
-    if (au.exp >= au.maxExp) { au.level++; au.exp = 0; au.maxExp += 10; au.atk += 2; au.def += 1; if (au.level === 3) au.mov += 1; if (au.level === 5) { au.hp = Math.min(au.maxHp, au.hp + 20); } log.push({ turn: state.turn, msg: `  ⬆️ ${UNIT_DEFS[au.type].nameAr} ارتفع للمستوى ${au.level}!`, type: 'info' }); }
+    if (au.exp >= au.maxExp) {
+      au.level++; au.exp = 0; au.maxExp += 10; au.atk += 2; au.def += 1; if (au.level === 3) au.mov += 1; if (au.level === 5) { au.hp = Math.min(au.maxHp, au.hp + 20); }
+      log.push({ turn: state.turn, msg: `  ⬆️ ${UNIT_DEFS[au.type].nameAr} ارتفع للمستوى ${au.level}!`, type: 'info' });
+      // Feature 8: Experience sharing with adjacent allies
+      for (const [nc, nr] of getNeighbors(au.col, au.row)) {
+        const allyIdx = newUnits.findIndex(u => u.col === nc && u.row === nr && u.owner === 'player' && !u.isFake && u.id !== au.id && u.hp > 0);
+        if (allyIdx >= 0 && newUnits[allyIdx].level < 5) {
+          const ally = { ...newUnits[allyIdx] };
+          ally.exp += 3;
+          if (ally.exp >= ally.maxExp) { ally.level++; ally.exp = 0; ally.maxExp += 10; ally.atk += 2; ally.def += 1; log.push({ turn: state.turn, msg: `    📤 ${UNIT_DEFS[ally.type].nameAr} حصل +3 خبرة مشاركة وارتقى!`, type: 'info' }); }
+          else { log.push({ turn: state.turn, msg: `    📤 ${UNIT_DEFS[ally.type].nameAr} حصل +3 خبرة مشاركة`, type: 'info' }); }
+          newUnits[allyIdx] = ally;
+        }
+      }
+    }
     au.attacked = true;
     // Commando heals after attack when ability active
     if (au.abilityActive && au.type === 'commando') {
@@ -881,7 +1010,7 @@ function handleConfirmAttack(state: GameState): GameState {
   const playerAlive = newUnits.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).length;
   const newEffects = [...state.effects, { id: `fx_${Date.now()}`, col: defender.col, row: defender.row, type: 'attack' as const, startTime: Date.now() }];
   if (newHp <= 0) newEffects.push({ id: `fx2_${Date.now()}`, col: defender.col, row: defender.row, type: 'explosion' as const, startTime: Date.now() });
-  return { ...state, units: newUnits, selectedId: null, validAttacks: [], validMoves: [], log, damagePreview: null, showBattleModal: null, playerUnitsKilled: pKilled, aiUnitsKilled: aKilled, totalDamageDealt: totalDmgDealt, totalDamageReceived: totalDmgReceived, artilleryKills, playerLostNoUnits, effects: newEffects, shakeKey: attacker.type === 'artillery' || attacker.type === 'missiles' || attacker.type === 'rocket_artillery' ? state.shakeKey + 1 : state.shakeKey, winner: aiAlive === 0 ? 'player' : playerAlive === 0 ? 'ai' : null, phase: aiAlive === 0 || playerAlive === 0 ? 'ai_turn' : state.phase };
+  return { ...state, grid: newGrid, units: newUnits, selectedId: null, validAttacks: [], validMoves: [], log, damagePreview: null, showBattleModal: null, playerUnitsKilled: pKilled, aiUnitsKilled: aKilled, totalDamageDealt: totalDmgDealt, totalDamageReceived: totalDmgReceived, artilleryKills, playerLostNoUnits, effects: newEffects, shakeKey: attacker.type === 'artillery' || attacker.type === 'missiles' || attacker.type === 'rocket_artillery' ? state.shakeKey + 1 : state.shakeKey, winner: aiAlive === 0 ? 'player' : playerAlive === 0 ? 'ai' : null, phase: aiAlive === 0 || playerAlive === 0 ? 'ai_turn' : state.phase };
 }
 function handleHexClick(state: GameState, col: number, row: number): GameState {
   if (state.phase !== 'movement' && state.phase !== 'attack') return state;
@@ -1070,13 +1199,43 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
         eTargets.sort((a, b) => a.hp - b.hp);
       }
       for (const target of eTargets) {
-        const dmg = calcDamage(currentUnit, target, aiTactic, null, state.grid, state.weather, ai.morale, state.player.morale, false);
+        let aiDmg = calcDamage(currentUnit, target, aiTactic, null, state.grid, state.weather, ai.morale, state.player.morale, false);
+        // Feature 1: Crit/miss for AI
+        let aiCrit = false, aiMiss = false;
+        if (Math.random() < missChance(currentUnit.type)) { aiMiss = true; aiDmg = 0; }
+        else if (Math.random() < critChance(currentUnit.type)) { aiCrit = true; aiDmg = Math.round(aiDmg * 1.5); }
+        // Feature 2: Combine arms for AI
+        let aiCombine = false;
+        if (!aiMiss && checkCombineArms(currentUnit, units)) { aiCombine = true; aiDmg = Math.round(aiDmg * 1.2); }
+        // Feature 3: Flanking for AI
+        let aiFlank = false;
+        if (!aiMiss && isFlanking(currentUnit, target, units)) { aiFlank = true; aiDmg = Math.round(aiDmg * 1.25); }
         const tidx = units.findIndex(u => u.id === target.id);
         if (tidx >= 0) {
-          let hp = units[tidx].hp - dmg;
-          log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[currentUnit.type].nameAr} (عدو) هاجم ${UNIT_DEFS[target.type].nameAr} - ${dmg}`, type: 'attack' });
+          let hp = units[tidx].hp - aiDmg;
+          let aiAtkMsg = `▸ ${UNIT_DEFS[currentUnit.type].nameAr} (عدو) هاجم ${UNIT_DEFS[target.type].nameAr} - ${aiDmg}`;
+          if (aiMiss) aiAtkMsg += ' 💨 أخطأ!';
+          else if (aiCrit) aiAtkMsg += ' 💥 ضربة حرجة!';
+          if (aiCombine) aiAtkMsg += ' 🔗';
+          if (aiFlank) aiAtkMsg += ' 🗡️';
+          log.push({ turn: state.turn, msg: aiAtkMsg, type: 'attack' });
           if (playerTactic?.special === 'tactical_retreat' && hp <= 0 && target.owner === 'player') { hp = Math.floor(target.maxHp * 0.5); log.push({ turn: state.turn, msg: '  ⚡ انسحاب تكتيكي!', type: 'defense' }); }
           units[tidx] = { ...units[tidx], hp };
+          // Feature 6: AI terrain destruction
+          if (hp > 0 && (currentUnit.type === 'artillery' || currentUnit.type === 'rocket_artillery' || currentUnit.type === 'missiles')) {
+            const dTerrain = state.grid[target.col]?.[target.row]?.terrain;
+            if (dTerrain) {
+              let tdDestroyed = false;
+              let tdNew: TerrainType = dTerrain;
+              if (dTerrain === 'urban' && Math.random() < 0.4) { tdNew = 'ruins'; tdDestroyed = true; }
+              else if (dTerrain === 'forest' && Math.random() < 0.5) { tdNew = 'plains'; tdDestroyed = true; }
+              else if (dTerrain === 'road' && Math.random() < 0.3) { tdNew = 'plains'; tdDestroyed = true; }
+              if (tdDestroyed) {
+                newGrid[target.col][target.row] = { ...newGrid[target.col][target.row], terrain: tdNew };
+                log.push({ turn: state.turn, msg: `  🏚️ تدمير تضاريس!`, type: 'system' });
+              }
+            }
+          }
           if (hp > 0 && target.range >= hexDist(currentUnit.col, currentUnit.row, target.col, target.row) && target.type !== 'artillery' && target.type !== 'rocket_artillery') {
             const cDmg = calcDamage(target, currentUnit, playerTactic, null, state.grid, state.weather, state.player.morale, ai.morale, true);
             const uidx2 = units.findIndex(u => u.id === currentUnit.id);
@@ -1268,11 +1427,43 @@ function handleAIComplete(state: GameState): GameState {
   if (weather === 'storm') { pMorale -= 5; aMorale -= 5; }
   pMorale = Math.max(0, Math.min(100, pMorale));
   aMorale = Math.max(0, Math.min(100, aMorale));
+  // Feature 7: Random morale events
+  const moraleEvent = getMoraleEvent();
+  const moraleEventLog: LogEntry[] = [];
+  if (moraleEvent) {
+    pMorale = Math.max(0, Math.min(100, pMorale + moraleEvent.playerEffect));
+    aMorale = Math.max(0, Math.min(100, aMorale + moraleEvent.aiEffect));
+    moraleEventLog.push({ turn: newTurn, msg: moraleEvent.msg, type: 'system' });
+  }
   const pLeveled = updated.map(u => {
     if (u.owner === 'player' && state.player.training >= 20 && u.level < 5) { const nu = { ...u, level: u.level + 1, atk: u.atk + 2, def: u.def + 1 }; if (nu.level === 3) nu.mov += 1; return nu; }
     return u;
   });
-  const stormDmg = weather === 'storm' ? pLeveled.map(u => { if (Math.random() > 0.8 && !u.isFake) return { ...u, hp: Math.max(1, u.hp - 5) }; return u; }) : pLeveled;
+  let stormDmg = weather === 'storm' ? pLeveled.map(u => { if (Math.random() > 0.8 && !u.isFake) return { ...u, hp: Math.max(1, u.hp - 5) }; return u; }) : pLeveled;
+  // Feature 5: Reinforcement waves every 5 turns
+  const reinforcementLog: LogEntry[] = [];
+  if (newTurn % 5 === 0 && newTurn > 1) {
+    const playerSpawns = findSafeSpawn(newGrid, stormDmg, [0, 3], 'player');
+    if (playerSpawns.length > 0) {
+      const pTypes: UnitType[] = ['infantry', 'armor', 'medics'];
+      const pType = pTypes[Math.floor(Math.random() * pTypes.length)];
+      const [pc, pr] = playerSpawns[Math.floor(Math.random() * playerSpawns.length)];
+      const pReinUnit = createUnit(Date.now() + 9000, pType, 'player', pc, pr);
+      pReinUnit.moved = true; pReinUnit.attacked = true;
+      stormDmg = [...stormDmg, pReinUnit];
+      reinforcementLog.push({ turn: newTurn, msg: `📢 موجات إمداد! وحدة ${UNIT_DEFS[pType].nameAr} جديدة!`, type: 'system' });
+    }
+    const aiSpawns = findSafeSpawn(newGrid, stormDmg, [10, 13], 'ai');
+    if (aiSpawns.length > 0) {
+      const aTypes: UnitType[] = ['infantry', 'armor', 'medics'];
+      const aType = aTypes[Math.floor(Math.random() * aTypes.length)];
+      const [ac, ar] = aiSpawns[Math.floor(Math.random() * aiSpawns.length)];
+      const aReinUnit = createUnit(Date.now() + 9001, aType, 'ai', ac, ar);
+      aReinUnit.moved = true; aReinUnit.attacked = true;
+      stormDmg = [...stormDmg, aReinUnit];
+      reinforcementLog.push({ turn: newTurn, msg: `📢 موجات إمداد العدو!`, type: 'system' });
+    }
+  }
   const revealed = state.revealed.map(r => [...r]);
   const visionRange = weather === 'fog' ? 1 : 2;
   stormDmg.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).forEach(u => revealAround(newGrid, revealed, u.col, u.row, u.type === 'cavalry' || u.type === 'scouts' ? visionRange + 1 : u.type === 'artillery' || u.type === 'rocket_artillery' ? Math.max(1, visionRange - 1) : visionRange));
@@ -1328,7 +1519,7 @@ function handleAIComplete(state: GameState): GameState {
   aMorale = Math.max(0, Math.min(100, aMorale));
   // Player training from strategic points
   const pTrainingGain = state.player.training >= 20 ? state.player.training - 20 + 5 : state.player.training + 5 + pStrategicTraining;
-  const nextLog = [...state.log, ...towerLog, ...strategicLog, { turn: newTurn, msg: `═══ الدور ${newTurn} ═══`, type: 'info' }, { turn: newTurn, msg: `📦 +${supplyGain} إمداد, +5 تدريب | ${WEATHER_NAMES[weather].icon} ${WEATHER_NAMES[weather].name}`, type: 'info' }];
+  const nextLog = [...state.log, ...towerLog, ...strategicLog, ...moraleEventLog, ...reinforcementLog, { turn: newTurn, msg: `═══ الدور ${newTurn} ═══`, type: 'info' }, { turn: newTurn, msg: `📦 +${supplyGain} إمداد, +5 تدريب | ${WEATHER_NAMES[weather].icon} ${WEATHER_NAMES[weather].name}`, type: 'info' }];
   if (playerSupplyDelta < 0) nextLog.push({ turn: newTurn, msg: `📉 -${Math.abs(playerSupplyDelta)} إمداد (تأثير العدو)`, type: 'tactic' });
   try { if (typeof window !== 'undefined') localStorage.setItem('warGame_auto', JSON.stringify({ ...state, units: stormDmg, grid: newGrid, revealed, turn: newTurn })); } catch {}
   return {
@@ -1577,15 +1768,22 @@ function GameHeader({ state, dispatch }: { state: GameState; dispatch: React.Dis
         {aiSPCount > 0 && <span className="text-red-400" title="نقاط استراتيجية للعدو">🏛️ {aiSPCount}</span>}
       </div>
       <div className="flex items-center gap-1 flex-wrap">
+        <button onClick={() => dispatch({ type: 'TOGGLE_STATS' })} className={`px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer ${state.showStats ? 'ring-1 ring-yellow-400' : ''}`} title="إحصائيات">📊</button>
         <div className="text-gray-300 px-2 py-1 rounded" style={{ background: '#0f3460' }}>{phaseNames[state.phase]}</div>
         {tactic && <div className="text-yellow-400 px-2 py-1 rounded" style={{ background: '#0f3460', fontSize: '10px' }}>{tactic.name}</div>}
         {state.buildMode && <div className="text-green-400 px-2 py-1 rounded" style={{ background: '#0f3460', fontSize: '10px' }}>🔨 بناء: {BUILDING_DEFS[state.buildMode].nameAr}</div>}
         <button onClick={() => dispatch({ type: 'UNDO' })} disabled={!state.previousState} className="px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer disabled:opacity-30" title="تراجع">↩️</button>
         <button onClick={() => dispatch({ type: 'SAVE_GAME', slot: 0 })} className="px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer" title="حفظ">💾</button>
+        {state.phase === 'attack' && state.selectedId && (() => { const su = state.units.find(u => u.id === state.selectedId); return su && su.owner === 'player' && !su.attacked; })() && (
+          <button onClick={() => dispatch({ type: 'RETREAT_UNIT' })} className="py-1 px-3 rounded text-xs font-bold text-white cursor-pointer" style={{ background: 'linear-gradient(135deg, #3498db, #2980b9)' }} title="انسحاب بعيداً عن الأعداء">↩️ انسحاب</button>
+        )}
         {(state.phase === 'movement' || state.phase === 'attack') && (
           <button onClick={() => dispatch({ type: state.phase === 'movement' ? 'END_MOVEMENT' : 'END_ATTACK' })} className="py-1 px-3 rounded text-xs font-bold text-white cursor-pointer" style={{ background: 'linear-gradient(135deg, #e94560, #c0392b)' }}>
             {state.phase === 'movement' ? '⚔️ هجوم' : '⏭️ نهاية'}
           </button>
+        )}
+        {state.phase === 'ai_turn' && (
+          <button onClick={() => dispatch({ type: 'AI_TURN_COMPLETE' })} className="py-1 px-3 rounded text-xs font-bold text-white cursor-pointer" style={{ background: 'linear-gradient(135deg, #e67e22, #d35400)' }}>⏩ تخطي</button>
         )}
       </div>
     </div>
@@ -1869,6 +2067,34 @@ function GameLog({ state }: { state: GameState }) {
     </div>
   );
 }
+// Feature 9: Quick Battle Stats Panel
+function StatsPanel({ state }: { state: GameState }) {
+  const pUnits = state.units.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0);
+  const aUnits = state.units.filter(u => u.owner === 'ai' && !u.isFake && u.hp > 0);
+  const pAvgHp = pUnits.length > 0 ? Math.round(pUnits.reduce((s, u) => s + u.hp / u.maxHp * 100, 0) / pUnits.length) : 0;
+  const aAvgHp = aUnits.length > 0 ? Math.round(aUnits.reduce((s, u) => s + u.hp / u.maxHp * 100, 0) / aUnits.length) : 0;
+  const totalHexes = COLS * ROWS;
+  const revealedCount = state.revealed.flat().filter(Boolean).length;
+  const playerSP = state.grid.flat().filter(c => c.strategicPoint && c.strategicOwner === 'player').length;
+  const aiSP = state.grid.flat().filter(c => c.strategicPoint && c.strategicOwner === 'ai').length;
+  const pMaxLv = pUnits.length > 0 ? Math.max(...pUnits.map(u => u.level)) : 0;
+  const aMaxLv = aUnits.length > 0 ? Math.max(...aUnits.map(u => u.level)) : 0;
+  return (
+    <div className="p-3 rounded-lg z-20 text-xs" style={{ background: '#16213eee', border: '1px solid #0f3460', minWidth: '220px', backdropFilter: 'blur(8px)' }}>
+      <div className="text-white font-bold mb-2">📊 إحصائيات المعركة</div>
+      <div className="space-y-1.5 text-gray-300">
+        <div className="flex justify-between"><span>⚔️ وحدات:</span><span><span className="text-green-400">{pUnits.length}</span> vs <span className="text-red-400">{aUnits.length}</span></span></div>
+        <div className="w-full h-1.5 rounded-full bg-gray-700"><div className="h-1.5 rounded-full bg-green-500" style={{ width: `${Math.min(100, (pUnits.length / Math.max(1, pUnits.length + aUnits.length)) * 100)}%` }} /></div>
+        <div className="flex justify-between"><span>❤️ صحة متوسطة:</span><span><span className="text-green-400">{pAvgHp}%</span> vs <span className="text-red-400">{aAvgHp}%</span></span></div>
+        <div className="flex justify-between"><span>👁️ استكشاف:</span><span className="text-blue-400">{Math.round(revealedCount / totalHexes * 100)}%</span></div>
+        <div className="flex justify-between"><span>🏛️ نقاط:</span><span><span className="text-green-400">{playerSP}</span> vs <span className="text-red-400">{aiSP}</span></span></div>
+        <div className="flex justify-between"><span>📦 إمداد:</span><span><span className="text-yellow-400">{state.player.supply}</span> vs <span className="text-red-300">{state.ai.supply}</span></span></div>
+        <div className="flex justify-between"><span>💪 معنويات:</span><span><span className={state.player.morale > 60 ? 'text-green-400' : 'text-red-400'}>{state.player.morale}%</span> vs <span className={state.ai.morale > 60 ? 'text-green-400' : 'text-red-400'}>{state.ai.morale}%</span></span></div>
+        <div className="flex justify-between"><span>⭐ أعلى مستوى:</span><span><span className="text-yellow-400">{pMaxLv}</span> vs <span className="text-orange-400">{aMaxLv}</span></span></div>
+      </div>
+    </div>
+  );
+}
 // ==================== MAIN EXPORT ====================
 function ProfileScreen({ profile, setProfile, onBack }: { profile: PlayerProfile; setProfile: (p: PlayerProfile) => void; onBack: () => void }) {
   const [editingName, setEditingName] = useState(false);
@@ -1980,7 +2206,7 @@ export default function WarGame() {
   }, [state.effects.length]);
   useEffect(() => {
     if (state.phase === 'ai_turn' && state.animating) {
-      const timer = setTimeout(() => dispatch({ type: 'AI_TURN_COMPLETE' }), 1200);
+      const timer = setTimeout(() => dispatch({ type: 'AI_TURN_COMPLETE' }), 800);
       return () => clearTimeout(timer);
     }
   }, [state.phase, state.animating]);
@@ -2000,6 +2226,7 @@ export default function WarGame() {
           </div>
         </div>
         <div className="w-full lg:w-64 space-y-2">
+          {state.showStats && <StatsPanel state={state} />}
           {state.phase === 'planning' ? <TacticSelector state={state} dispatch={dispatch} /> : <UnitCardPanel state={state} dispatch={dispatch} />}
           <div className="p-2 rounded-lg text-xs" style={{ background: '#16213e' }}>
             <div className="text-white font-bold mb-1">📊 ملخص</div>
