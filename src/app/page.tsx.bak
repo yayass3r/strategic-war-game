@@ -5,7 +5,10 @@ type TerrainType = 'plains' | 'mountain' | 'forest' | 'water' | 'desert' | 'urba
 type UnitType = 'infantry' | 'armor' | 'artillery' | 'special_forces' | 'cavalry' | 'missiles' | 'medics' | 'engineers' | 'scouts' | 'marines' | 'rocket_artillery' | 'commando' | 'supply_truck';
 type Owner = 'player' | 'ai';
 type MapPreset = 'classic' | 'desert_storm' | 'mountain_pass' | 'island_hopping' | 'forest_ambush' | 'urban_warfare' | 'river_crossing';
-type GameScreen = 'menu' | 'playing' | 'how_to_play' | 'game_over' | 'map_select' | 'profile';
+type GameScreen = 'menu' | 'playing' | 'how_to_play' | 'game_over' | 'map_select' | 'profile' | 'campaign' | 'daily';
+type AIPersonality = 'aggressive' | 'defensive' | 'balanced';
+type GameMode = 'skirmish' | 'campaign' | 'daily';
+type MapSize = 'small' | 'medium' | 'large';
 type GamePhase = 'planning' | 'movement' | 'attack' | 'ai_turn';
 type TacticCategory = 'attack' | 'defense' | 'special';
 type LogType = 'info' | 'attack' | 'defense' | 'tactic' | 'movement' | 'system' | 'weather' | 'achievement';
@@ -19,7 +22,7 @@ interface TerrainDef { nameAr: string; color: string; atkBonus: number; defBonus
 interface BuildingDef { nameAr: string; icon: string; color: string; desc: string; }
 interface TacticDef { id: string; name: string; desc: string; ref: string; category: TacticCategory; atkMod: number; defMod: number; movMod: number; special: string; }
 interface Unit { id: string; type: UnitType; owner: Owner; hp: number; maxHp: number; atk: number; def: number; mov: number; range: number; col: number; row: number; moved: boolean; attacked: boolean; level: number; isFake: boolean; fakeTurns: number; exp: number; maxExp: number; abilityCooldownLeft: number; abilityActive: boolean; abilityActiveTurns: number; entrenched: boolean; }
-interface HexCell { col: number; row: number; terrain: TerrainType; building: BuildingType | null; buildingOwner: Owner | null; strategicPoint: StrategicPointType | null; strategicOwner: Owner | null; garrisonTurn: number; }
+interface HexCell { col: number; row: number; terrain: TerrainType; building: BuildingType | null; buildingOwner: Owner | null; strategicPoint: StrategicPointType | null; strategicOwner: Owner | null; garrisonTurn: number; buildingLevel: number; }
 interface PlayerProfile { name: string; level: number; xp: number; xpToNext: number; totalWins: number; totalLosses: number; totalGames: number; totalKills: number; totalDamageDealt: number; achievements: string[]; unlockedPerks: string[]; rank: string; }
 interface PlayerState { supply: number; morale: number; training: number; }
 interface LogEntry { turn: number; msg: string; type: LogType; }
@@ -48,9 +51,19 @@ interface GameState {
   playerDeployCount: number;
   strategicPointsCaptured: number;
   showStats: boolean;
+  aiPersonality: AIPersonality;
+  gameMode: GameMode;
+  campaignMission: number;
+  mapSize: MapSize;
+  upgradeMode: boolean;
+  soundEnabled: boolean;
 }
 type Action =
-  | { type: 'START_GAME'; difficulty: Difficulty; mapPreset: MapPreset }
+  | { type: 'START_GAME'; difficulty: Difficulty; mapPreset: MapPreset; aiPersonality?: AIPersonality; gameMode?: GameMode; campaignMission?: number; mapSize?: MapSize }
+  | { type: 'UPGRADE_BUILDING'; col: number; row: number }
+  | { type: 'ENTER_UPGRADE_MODE' }
+  | { type: 'EXIT_UPGRADE_MODE' }
+  | { type: 'TOGGLE_SOUND' }
   | { type: 'SET_SCREEN'; screen: GameScreen }
   | { type: 'SELECT_TACTIC'; id: string | null; secondary?: boolean }
   | { type: 'CONFIRM_TACTIC' }
@@ -73,8 +86,75 @@ type Action =
   | { type: 'RETREAT_UNIT' }
   | { type: 'TOGGLE_STATS' };
 // ==================== CONSTANTS ====================
-const COLS = 14, ROWS = 10, HEX_SIZE = 24;
+let COLS = 14, ROWS = 10;
+const HEX_SIZE = 24;
 const SQRT3 = Math.sqrt(3);
+// ==================== SOUND SYSTEM ====================
+const audioCtxRef = { current: null as AudioContext | null };
+function getAudioCtx(): AudioContext | null { if (typeof window === 'undefined') return null; if (!audioCtxRef.current) audioCtxRef.current = new AudioContext(); return audioCtxRef.current; }
+function playSound(type: 'attack' | 'move' | 'deploy' | 'build' | 'capture' | 'victory' | 'defeat' | 'levelup' | 'critical' | 'miss' | 'ability') {
+  const ctx = getAudioCtx(); if (!ctx) return;
+  try {
+    const osc = ctx.createOscillator(); const gain = ctx.createGain(); osc.connect(gain); gain.connect(ctx.destination); const now = ctx.currentTime;
+    switch (type) {
+      case 'attack': osc.type='sawtooth'; osc.frequency.setValueAtTime(200,now); osc.frequency.linearRampToValueAtTime(80,now+0.15); gain.gain.setValueAtTime(0.15,now); gain.gain.linearRampToValueAtTime(0,now+0.15); osc.start(now); osc.stop(now+0.15); break;
+      case 'critical': osc.type='square'; osc.frequency.setValueAtTime(300,now); osc.frequency.linearRampToValueAtTime(600,now+0.1); gain.gain.setValueAtTime(0.2,now); gain.gain.linearRampToValueAtTime(0,now+0.2); osc.start(now); osc.stop(now+0.2); break;
+      case 'miss': osc.type='sine'; osc.frequency.setValueAtTime(400,now); osc.frequency.linearRampToValueAtTime(200,now+0.1); gain.gain.setValueAtTime(0.08,now); gain.gain.linearRampToValueAtTime(0,now+0.1); osc.start(now); osc.stop(now+0.1); break;
+      case 'move': osc.type='sine'; osc.frequency.setValueAtTime(300,now); osc.frequency.linearRampToValueAtTime(400,now+0.05); gain.gain.setValueAtTime(0.05,now); gain.gain.linearRampToValueAtTime(0,now+0.05); osc.start(now); osc.stop(now+0.05); break;
+      case 'deploy': osc.type='triangle'; osc.frequency.setValueAtTime(400,now); osc.frequency.linearRampToValueAtTime(600,now+0.1); gain.gain.setValueAtTime(0.1,now); gain.gain.linearRampToValueAtTime(0,now+0.1); osc.start(now); osc.stop(now+0.1); break;
+      case 'build': osc.type='triangle'; osc.frequency.setValueAtTime(200,now); osc.frequency.linearRampToValueAtTime(300,now+0.15); osc.frequency.linearRampToValueAtTime(400,now+0.3); gain.gain.setValueAtTime(0.1,now); gain.gain.linearRampToValueAtTime(0,now+0.3); osc.start(now); osc.stop(now+0.3); break;
+      case 'capture': osc.type='square'; osc.frequency.setValueAtTime(500,now); osc.frequency.linearRampToValueAtTime(700,now+0.15); osc.frequency.linearRampToValueAtTime(500,now+0.3); gain.gain.setValueAtTime(0.12,now); gain.gain.linearRampToValueAtTime(0,now+0.3); osc.start(now); osc.stop(now+0.3); break;
+      case 'levelup': osc.type='sine'; osc.frequency.setValueAtTime(400,now); osc.frequency.linearRampToValueAtTime(800,now+0.15); osc.frequency.linearRampToValueAtTime(1000,now+0.3); gain.gain.setValueAtTime(0.15,now); gain.gain.linearRampToValueAtTime(0,now+0.3); osc.start(now); osc.stop(now+0.3); break;
+      case 'ability': osc.type='sawtooth'; osc.frequency.setValueAtTime(300,now); osc.frequency.linearRampToValueAtTime(500,now+0.2); gain.gain.setValueAtTime(0.12,now); gain.gain.linearRampToValueAtTime(0,now+0.2); osc.start(now); osc.stop(now+0.2); break;
+      case 'victory': osc.type='sine'; osc.frequency.setValueAtTime(400,now); osc.frequency.linearRampToValueAtTime(600,now+0.2); osc.frequency.linearRampToValueAtTime(800,now+0.4); gain.gain.setValueAtTime(0.15,now); gain.gain.linearRampToValueAtTime(0,now+0.5); osc.start(now); osc.stop(now+0.5); break;
+      case 'defeat': osc.type='sawtooth'; osc.frequency.setValueAtTime(300,now); osc.frequency.linearRampToValueAtTime(100,now+0.4); gain.gain.setValueAtTime(0.12,now); gain.gain.linearRampToValueAtTime(0,now+0.4); osc.start(now); osc.stop(now+0.4); break;
+    }
+  } catch {}
+}
+
+const AI_PERSONALITIES: Record<AIPersonality, { nameAr: string; icon: string; desc: string; atkBonus: number; defBonus: number; supplyBonus: number; deployBias: UnitType[] }> = {
+  aggressive: { nameAr: 'القائد المهاجم', icon: '🔥', desc: 'يركز على الهجوم بقوة ويتجاهل الدفاع', atkBonus: 0.15, defBonus: -0.1, supplyBonus: -5, deployBias: ['armor', 'cavalry', 'commando', 'rocket_artillery'] },
+  defensive: { nameAr: 'الاستراتيجي الدفاعي', icon: '🛡️', desc: 'يبني دفاعات قوية وينتظر الهجوم', atkBonus: -0.1, defBonus: 0.2, supplyBonus: 5, deployBias: ['infantry', 'engineers', 'medics', 'artillery'] },
+  balanced: { nameAr: 'القائد المتوازن', icon: '⚖️', desc: 'توازن بين الهجوم والدفاع', atkBonus: 0, defBonus: 0, supplyBonus: 0, deployBias: ['infantry', 'armor', 'artillery'] },
+};
+const MAP_SIZES: Record<MapSize, { cols: number; rows: number; nameAr: string; icon: string }> = {
+  small: { cols: 10, rows: 8, nameAr: 'صغيرة', icon: '📋' },
+  medium: { cols: 14, rows: 10, nameAr: 'متوسطة', icon: '🗺️' },
+  large: { cols: 18, rows: 12, nameAr: 'كبيرة', icon: '🌐' },
+};
+const BUILDING_LEVEL_BONUSES: Record<BuildingType, { l2: string; l3: string }> = {
+  factory: { l2: '+8 إمداد/دور', l3: '+12 إمداد/دور +3 تدريب' },
+  hospital: { l2: 'يشفي +25 HP/دور', l3: 'يشفي +35 HP/دور' },
+  fortress: { l2: '+75% دفاع', l3: '+100% دفاع +10% هجوم' },
+  tower: { l2: 'يكشف 7 سداسيات', l3: 'يكشف 10 سداسيات' },
+  barracks: { l2: 'خصم 40%', l3: 'خصم 50% +2 وحدات/دور' },
+  defense_tower: { l2: 'ضرر 25 نطاق 3', l3: 'ضرر 35 نطاق 3 يهاجم مرتين' },
+  ammo_depot: { l2: '+18 إمداد +10% هجوم', l3: '+25 إمداد +15% هجوم' },
+  bunker: { l2: '+60% دفاع +30% مجاور', l3: '+80% دفاع +40% مجاور' },
+};
+interface CampaignMission { id: number; nameAr: string; desc: string; mapPreset: MapPreset; difficulty: Difficulty; aiPersonality: AIPersonality; objectives: string[]; reward: number; }
+const CAMPAIGN_MISSIONS: CampaignMission[] = [
+  { id: 1, nameAr: 'الفصل الأول: البداية', desc: 'تعلم أساسيات القتال في معركة تدريبية', mapPreset: 'classic', difficulty: 'easy', aiPersonality: 'balanced', objectives: ['فوز بالمعركة'], reward: 30 },
+  { id: 2, nameAr: 'الفصل الثاني: الصحراء', desc: 'اجتز واحتل واحة في قلب الصحراء', mapPreset: 'desert_storm', difficulty: 'easy', aiPersonality: 'aggressive', objectives: ['فوز', 'احتل مخزن إمدادات'], reward: 40 },
+  { id: 3, nameAr: 'الفصل الثالث: الجبال', desc: 'اعبر الممر الجبلي واقتحم الحصن', mapPreset: 'mountain_pass', difficulty: 'normal', aiPersonality: 'defensive', objectives: ['فوز', 'لا تخسر أي وحدة'], reward: 50 },
+  { id: 4, nameAr: 'الفصل الرابع: الغابة', desc: 'نج من الكمين في غابة كثيفة', mapPreset: 'forest_ambush', difficulty: 'normal', aiPersonality: 'balanced', objectives: ['فوز', 'احتل نقطتين استراتيجيتين'], reward: 60 },
+  { id: 5, nameAr: 'الفصل الخامس: المدينة', desc: 'سيطر على المدينة في قتال حضري', mapPreset: 'urban_warfare', difficulty: 'hard', aiPersonality: 'aggressive', objectives: ['فوز', 'ابن مبنين'], reward: 70 },
+  { id: 6, nameAr: 'الفصل الأخير: المعركة النهائية', desc: 'الهجوم الكبير على قلعة العدو الأخيرة', mapPreset: 'river_crossing', difficulty: 'legendary', aiPersonality: 'aggressive', objectives: ['فوز', 'احتل 3+ نقاط', 'لا تخسر أكثر من وحدتين'], reward: 100 },
+];
+function getDailyChallenge(): { seed: number; mapPreset: MapPreset; difficulty: Difficulty; aiPersonality: AIPersonality; bonusXP: number } {
+  const today = new Date(); const dayNum = today.getFullYear() * 10000 + (today.getMonth() + 1) * 100 + today.getDate();
+  const presets: MapPreset[] = ['classic', 'desert_storm', 'mountain_pass', 'island_hopping', 'forest_ambush', 'urban_warfare', 'river_crossing'];
+  const difficulties: Difficulty[] = ['normal', 'hard', 'legendary'];
+  const personalities: AIPersonality[] = ['aggressive', 'defensive', 'balanced'];
+  let s = dayNum; s = (s * 16807) % 2147483647; const r1 = s / 2147483647; s = (s * 16807) % 2147483647; const r2 = s / 2147483647; s = (s * 16807) % 2147483647; const r3 = s / 2147483647;
+  return { seed: dayNum, mapPreset: presets[Math.floor(r1 * presets.length)], difficulty: difficulties[Math.floor(r2 * difficulties.length)], aiPersonality: personalities[Math.floor(r3 * personalities.length)], bonusXP: 50 };
+}
+function getBuildingUpgradeCost(bType: BuildingType, currentLevel: number): number {
+  const base = BUILDING_COSTS[bType] || 20;
+  if (currentLevel >= 2) return Math.ceil(base * 1.0);
+  return Math.ceil(base * 0.6);
+}
+
 const COUNTER_M = 0.5;
 const WEATHER_NAMES: Record<WeatherType, { name: string; icon: string }> = {
   clear: { name: 'صافي', icon: '☀️' }, rain: { name: 'مطر', icon: '🌧️' }, snow: { name: 'ثلج', icon: '❄️' }, fog: { name: 'ضباب', icon: '🌫️' }, storm: { name: 'عاصفة', icon: '⛈️' },
@@ -291,18 +371,32 @@ function calcDamage(attacker: Unit, defender: Unit, tactic: TacticDef | null, se
   defStat *= (1 + defender.level * 0.05);
   if (defender.entrenched) defStat *= 1.4;
   const cell = grid[defender.col]?.[defender.row];
-  if (cell?.building === 'fortress' && cell.buildingOwner === defender.owner) defStat *= 1.5;
+  if (cell?.building === 'fortress' && cell.buildingOwner === defender.owner) {
+    const fLv = cell.buildingLevel || 1;
+    defStat *= fLv >= 3 ? 2.0 : fLv >= 2 ? 1.75 : 1.5;
+    if (fLv >= 3) atkStat *= 1.1;
+  }
   // Bunker defense bonus
   const dCell = grid[defender.col]?.[defender.row];
-  if (dCell?.building === 'bunker' && dCell.buildingOwner === defender.owner) defStat *= 1.4;
+  if (dCell?.building === 'bunker' && dCell.buildingOwner === defender.owner) {
+    const bLv = dCell.buildingLevel || 1;
+    defStat *= bLv >= 3 ? 1.8 : bLv >= 2 ? 1.6 : 1.4;
+  }
   for (const [nc, nr] of getNeighbors(defender.col, defender.row)) {
     const n = grid[nc]?.[nr];
-    if (n?.building === 'bunker' && n.buildingOwner === defender.owner) { defStat *= 1.2; break; }
+    if (n?.building === 'bunker' && n.buildingOwner === defender.owner) {
+      const nbLv = n.buildingLevel || 1;
+      defStat *= nbLv >= 3 ? 1.4 : nbLv >= 2 ? 1.3 : 1.2; break;
+    }
   }
   // Ammo depot attack bonus
   for (const [nc, nr] of getNeighbors(attacker.col, attacker.row)) {
     const n = grid[nc]?.[nr];
-    if (n?.building === 'ammo_depot' && n.buildingOwner === attacker.owner) { atkStat *= 1.05; break; }
+    if (n?.building === 'ammo_depot' && n.buildingOwner === attacker.owner) {
+      const aLv = n.buildingLevel || 1;
+      atkStat *= aLv >= 3 ? 1.15 : aLv >= 2 ? 1.10 : 1.05;
+      break;
+    }
     // Weapons depot strategic point: +15% atk for adjacent units
     if (n?.strategicPoint === 'weapons_depot' && n.strategicOwner === attacker.owner) { atkStat *= 1.15; break; }
     // Command post strategic point: +5% atk
@@ -416,11 +510,13 @@ function processDefenseTowerAttacks(state: GameState, units: Unit[], log: LogEnt
       const cell = state.grid[c][r];
       if (cell.building !== 'defense_tower' || !cell.buildingOwner) continue;
       const towerOwner = cell.buildingOwner;
-      const enemies = newUnits.filter(u => u.owner !== towerOwner && !u.isFake && u.hp > 0 && hexDist(c, r, u.col, u.row) <= 2);
+      const enemies = newUnits.filter(u => u.owner !== towerOwner && !u.isFake && u.hp > 0 && hexDist(c, r, u.col, u.row) <= tRange);
       if (enemies.length === 0) continue;
       enemies.sort((a, b) => hexDist(c, r, a.col, a.row) - hexDist(c, r, b.col, b.row));
       const target = enemies[0];
-      const dmg = 15;
+      const tLv = cell.buildingLevel || 1;
+      const dmg = tLv >= 3 ? 35 : tLv >= 2 ? 25 : 15;
+      const tRange = tLv >= 2 ? 3 : 2;
       const tIdx = newUnits.findIndex(u => u.id === target.id);
       if (tIdx >= 0) {
         newUnits[tIdx] = { ...newUnits[tIdx], hp: Math.max(0, newUnits[tIdx].hp - dmg) };
@@ -439,7 +535,7 @@ function processDefenseTowerAttacks(state: GameState, units: Unit[], log: LogEnt
 function createRNG() { let s = Date.now(); return () => { s = (s * 16807) % 2147483647; return s / 2147483647; }; }
 function makeGrid(): HexCell[][] {
   const grid: HexCell[][] = [];
-  for (let c = 0; c < COLS; c++) { grid[c] = []; for (let r = 0; r < ROWS; r++) { grid[c][r] = { col: c, row: r, terrain: 'plains', building: null, buildingOwner: null, strategicPoint: null, strategicOwner: null, garrisonTurn: 0 }; } }
+  for (let c = 0; c < COLS; c++) { grid[c] = []; for (let r = 0; r < ROWS; r++) { grid[c][r] = { col: c, row: r, terrain: 'plains', building: null, buildingOwner: null, strategicPoint: null, strategicOwner: null, garrisonTurn: 0, buildingLevel: 1 }; } }
   return grid;
 }
 function generateStrategicPoints(grid: HexCell[][]): HexCell[][] {
@@ -484,7 +580,7 @@ function placeBuildings(grid: HexCell[][], rand: () => number, types: BuildingTy
       const c = 3 + Math.floor(rand() * (COLS - 6));
       const r = Math.floor(rand() * ROWS);
       if (forbidden.includes(grid[c][r].terrain) || grid[c][r].building) continue;
-      grid[c][r].building = bt;
+      grid[c][r].building = bt; grid[c][r].buildingLevel = 1;
       break;
     }
   }
@@ -596,7 +692,7 @@ function generateMapForPreset(preset: MapPreset): HexCell[][] {
 function initRevealed(): boolean[][] { return Array.from({ length: COLS }, () => Array(ROWS).fill(false)); }
 function revealAround(grid: HexCell[][], revealed: boolean[][], col: number, row: number, range: number) {
   for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) { if (hexDist(col, row, c, r) <= range) revealed[c][r] = true; }
-  for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) { if (grid[c][r].building === 'tower' && revealed[c][r]) revealAround(grid, revealed, c, r, 5); }
+  for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) { if (grid[c][r].building === 'tower' && revealed[c][r]) { const tLv = grid[c][r].buildingLevel || 1; revealAround(grid, revealed, c, r, tLv >= 3 ? 10 : tLv >= 2 ? 7 : 5); } }
 }
 function createUnit(id: number, type: UnitType, owner: Owner, col: number, row: number): Unit {
   const d = UNIT_DEFS[type];
@@ -688,12 +784,22 @@ const initialState: GameState = {
   buildMode: null, validBuildPlacements: [], playerBuildCount: 0, playerDeployCount: 0,
   strategicPointsCaptured: 0,
   showStats: false,
+  aiPersonality: 'balanced' as AIPersonality,
+  gameMode: 'skirmish' as GameMode,
+  campaignMission: 0,
+  mapSize: 'medium' as MapSize,
+  upgradeMode: false,
+  soundEnabled: true,
 };
 function gameReducer(state: GameState, action: Action): GameState {
   switch (action.type) {
     case 'START_GAME': {
+      const mapSize = action.mapSize || 'medium';
+      const sz = MAP_SIZES[mapSize]; COLS = sz.cols; ROWS = sz.rows;
       const grid = generateMapForPreset(action.mapPreset);
       let units = createUnitsForMap(action.mapPreset);
+      const aiPersonality = action.aiPersonality || 'balanced';
+      const gameMode = action.gameMode || 'skirmish';
       const revealed = initRevealed();
       // Apply veteran_start perk
       let profile = loadProfile();
@@ -712,7 +818,7 @@ function gameReducer(state: GameState, action: Action): GameState {
           startLog.push({ turn: 1, msg: `🏛️ ${sp.icon} ${sp.nameAr} ظهرت على الخريطة!`, type: 'system' });
         }
       }
-      return { ...initialState, screen: 'playing', phase: 'planning', turn: 1, difficulty: action.difficulty, mapPreset: action.mapPreset, grid, units, revealed, weather: getWeather(), weatherTurnsLeft: 3, player: { supply: 20 + extraSupply, morale: 100, training: 0 }, log: startLog };
+      return { ...initialState, screen: 'playing', phase: 'planning', turn: 1, difficulty: action.difficulty, mapPreset: action.mapPreset, grid, units, revealed, weather: getWeather(), weatherTurnsLeft: 3, player: { supply: 20 + extraSupply, morale: 100, training: 0 }, log: startLog, aiPersonality, gameMode, campaignMission: action.campaignMission || 0, mapSize: mapSize as MapSize, soundEnabled: state.soundEnabled };
     }
     case 'SET_SCREEN': return { ...state, screen: action.screen };
     case 'SELECT_TACTIC': return action.secondary ? { ...state, secondaryTacticId: action.id } : { ...state, tacticId: action.id };
@@ -774,7 +880,7 @@ function gameReducer(state: GameState, action: Action): GameState {
       const bDef = BUILDING_DEFS[state.buildMode];
       const newGrid = state.grid.map(c => c.map(cell =>
         cell.col === action.col && cell.row === action.row
-          ? { ...cell, building: state.buildMode!, buildingOwner: 'player' as Owner }
+          ? { ...cell, building: state.buildMode!, buildingOwner: 'player' as Owner, buildingLevel: 1 }
           : cell
       ));
       return {
@@ -785,6 +891,23 @@ function gameReducer(state: GameState, action: Action): GameState {
       };
     }
     case 'CANCEL_BUILD': return { ...state, buildMode: null, validBuildPlacements: [] };
+    case 'TOGGLE_SOUND': return { ...state, soundEnabled: !state.soundEnabled };
+    case 'ENTER_UPGRADE_MODE': return { ...state, upgradeMode: true, buildMode: null, deployMode: null };
+    case 'EXIT_UPGRADE_MODE': return { ...state, upgradeMode: false };
+    case 'UPGRADE_BUILDING': {
+      const uCell = state.grid[action.col]?.[action.row];
+      if (!uCell?.building || uCell.buildingLevel >= 3) return state;
+      const engineers = state.units.filter(u => u.owner === 'player' && u.type === 'engineers' && u.hp > 0);
+      const nearEng = engineers.some(e => hexDist(e.col, e.row, action.col, action.row) <= 1);
+      if (!nearEng) return state;
+      const cost = getBuildingUpgradeCost(uCell.building, uCell.buildingLevel);
+      if (state.player.supply < cost) return state;
+      const newLevel = uCell.buildingLevel + 1;
+      const bDef = BUILDING_DEFS[uCell.building];
+      const bonus = newLevel === 2 ? BUILDING_LEVEL_BONUSES[uCell.building].l2 : BUILDING_LEVEL_BONUSES[uCell.building].l3;
+      const newUGrid = state.grid.map(c => c.map(cell => cell.col === action.col && cell.row === action.row ? { ...cell, buildingLevel: newLevel } : cell));
+      return { ...state, grid: newUGrid, upgradeMode: false, player: { ...state.player, supply: state.player.supply - cost }, log: [...state.log, { turn: state.turn, msg: `⬆️ ترقية ${bDef.nameAr} للمستوى ${newLevel}! (${bonus})`, type: 'system' }] };
+    }
     case 'TOGGLE_STATS': return { ...state, showStats: !state.showStats };
     case 'RETREAT_UNIT': {
       if (!state.selectedId || state.phase !== 'attack') return state;
@@ -974,7 +1097,7 @@ function handleConfirmAttack(state: GameState): GameState {
     au.exp += 8; if (newHp <= 0) au.exp += 12;
     if (au.exp >= au.maxExp) {
       au.level++; au.exp = 0; au.maxExp += 10; au.atk += 2; au.def += 1; if (au.level === 3) au.mov += 1; if (au.level === 5) { au.hp = Math.min(au.maxHp, au.hp + 20); }
-      log.push({ turn: state.turn, msg: `  ⬆️ ${UNIT_DEFS[au.type].nameAr} ارتفع للمستوى ${au.level}!`, type: 'info' });
+      log.push({ turn: state.turn, msg: `  ⬆️ ${UNIT_DEFS[au.type].nameAr} ارتفع للمستوى ${au.level}!`, type: 'info' }); if (state.soundEnabled) playSound('levelup');
       // Feature 8: Experience sharing with adjacent allies
       for (const [nc, nr] of getNeighbors(au.col, au.row)) {
         const allyIdx = newUnits.findIndex(u => u.col === nc && u.row === nr && u.owner === 'player' && !u.isFake && u.id !== au.id && u.hp > 0);
@@ -1021,6 +1144,13 @@ function handleHexClick(state: GameState, col: number, row: number): GameState {
     }
     return { ...state, buildMode: null, validBuildPlacements: [] };
   }
+  if (state.upgradeMode) {
+    const cell = state.grid[action.col]?.[action.row];
+    if (cell?.building && cell.buildingOwner === 'player') {
+      return gameReducer(state, { type: 'UPGRADE_BUILDING', col: action.col, row: action.row });
+    }
+    return { ...state, upgradeMode: false };
+  }
   if (state.deployMode) {
     const playerBarracksCount = state.grid.flat().filter(c => c.building === 'barracks' && c.buildingOwner === 'player').length;
     const maxDeploys = 1 + playerBarracksCount * 2;
@@ -1058,7 +1188,7 @@ function handleHexClick(state: GameState, col: number, row: number): GameState {
         if (destCell?.strategicPoint && destCell.strategicOwner !== 'player') {
           newGrid = state.grid.map(c => c.map(cell => cell.col === col && cell.row === row ? { ...cell, strategicOwner: 'player' as Owner, garrisonTurn: state.turn } : cell));
           const spDef = STRATEGIC_POINT_DEFS[destCell.strategicPoint];
-          moveLog.push({ turn: state.turn, msg: `🏛️ تم احتلال ${spDef.nameAr}!`, type: 'system' });
+          moveLog.push({ turn: state.turn, msg: `🏛️ تم احتلال ${spDef.nameAr}!`, type: 'system' }); if (state.soundEnabled) playSound('capture');
           spCaptured++;
         }
         return { ...state, grid: newGrid, units: newUnits, selectedId: sel.id, validMoves: [], validAttacks: attacks, previousState: prev, strategicPointsCaptured: spCaptured, log: moveLog };
@@ -1199,7 +1329,9 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
         eTargets.sort((a, b) => a.hp - b.hp);
       }
       for (const target of eTargets) {
+        const aP = AI_PERSONALITIES[state.aiPersonality || 'balanced'];
         let aiDmg = calcDamage(currentUnit, target, aiTactic, null, state.grid, state.weather, ai.morale, state.player.morale, false);
+        aiDmg = Math.round(aiDmg * (1 + aP.atkBonus));
         // Feature 1: Crit/miss for AI
         let aiCrit = false, aiMiss = false;
         if (Math.random() < missChance(currentUnit.type)) { aiMiss = true; aiDmg = 0; }
@@ -1304,7 +1436,8 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
     }
   }
   // Deploy
-  const deployable: UnitType[] = ['infantry', 'armor', 'artillery', 'cavalry', 'medics', 'engineers'];
+  const personality = AI_PERSONALITIES[state.aiPersonality || 'balanced'];
+  const deployable: UnitType[] = personality.deployBias;
   const aiBarracksCount = state.grid.flat().filter(c => c.building === 'barracks' && c.buildingOwner === 'ai').length;
   const maxDeploys = 2 + aiBarracksCount * 2;
   for (let d = 0; d < maxDeploys; d++) {
@@ -1382,10 +1515,10 @@ function handleAIComplete(state: GameState): GameState {
   const healed = leveled.map(u => {
     if (u.hp <= 0 || u.isFake) return u;
     const cell = aiNewGrid[u.col]?.[u.row];
-    if (cell?.building === 'hospital' && cell.buildingOwner === u.owner) return { ...u, hp: Math.min(u.maxHp, u.hp + 15) };
+    if (cell?.building === 'hospital' && cell.buildingOwner === u.owner) { const hLv = cell.buildingLevel || 1; return { ...u, hp: Math.min(u.maxHp, u.hp + (hLv >= 3 ? 35 : hLv >= 2 ? 25 : 15)) }; }
     for (const [nc, nr] of getNeighbors(u.col, u.row)) {
       const n = aiNewGrid[nc]?.[nr];
-      if (n?.building === 'hospital' && n.buildingOwner === u.owner) return { ...u, hp: Math.min(u.maxHp, u.hp + 15) };
+      if (n?.building === 'hospital' && n.buildingOwner === u.owner) { const hLv = n.buildingLevel || 1; return { ...u, hp: Math.min(u.maxHp, u.hp + (hLv >= 3 ? 35 : hLv >= 2 ? 25 : 15)) }; }
     }
     return u;
   });
@@ -1406,12 +1539,16 @@ function handleAIComplete(state: GameState): GameState {
     const cell = aiNewGrid[c][r];
     if (cell.building === 'factory') {
       const unit = getUnitAt(buildingUnits, c, r);
-      if (unit?.owner === 'player') pFactoryBonus += 5;
-      if (unit?.owner === 'ai') aFactoryBonus += 5;
+      const fLv = cell.buildingLevel || 1;
+      const fSup = fLv >= 3 ? 12 : fLv >= 2 ? 8 : 5;
+      if (unit?.owner === 'player') pFactoryBonus += fSup;
+      if (unit?.owner === 'ai') aFactoryBonus += fSup;
     }
     if (cell.building === 'ammo_depot') {
-      if (cell.buildingOwner === 'player') pFactoryBonus += 12;
-      if (cell.buildingOwner === 'ai') aFactoryBonus += 12;
+      const aLv = cell.buildingLevel || 1;
+      const aSup = aLv >= 3 ? 25 : aLv >= 2 ? 18 : 12;
+      if (cell.buildingOwner === 'player') pFactoryBonus += aSup;
+      if (cell.buildingOwner === 'ai') aFactoryBonus += aSup;
     }
   }
   const newGrid = aiNewGrid.map(col => col.map(cell => {
@@ -1511,7 +1648,8 @@ function handleAIComplete(state: GameState): GameState {
   let extraSupplyPerk = profile.unlockedPerks.includes('extra_supply') ? 5 : 0;
   let supplyMasterMult = profile.unlockedPerks.includes('supply_master') ? 1.5 : 1;
   const supplyGain = Math.floor((10 + pFactoryBonus + pStrategicSupply + extraSupplyPerk) * supplyMasterMult);
-  const aiSupplyGain = 10 + aFactoryBonus + aStrategicSupply + (state.difficulty === 'hard' ? 5 : state.difficulty === 'legendary' ? 10 : 0);
+  const aPersonality = AI_PERSONALITIES[state.aiPersonality || 'balanced'];
+  const aiSupplyGain = 10 + aFactoryBonus + aStrategicSupply + (state.difficulty === 'hard' ? 5 : state.difficulty === 'legendary' ? 10 : 0) + aPersonality.supplyBonus;
   // Apply strategic morale
   pMorale += pStrategicMorale;
   aMorale += aStrategicMorale;
@@ -1587,7 +1725,72 @@ function MainMenu({ onStart, onHelp, onLoad, onProfile, profile }: { onStart: (d
     </div>
   );
 }
-function MapSelectScreen({ onSelect, onBack, difficulty }: { onSelect: (preset: MapPreset) => void; onBack: () => void; difficulty: Difficulty }) {
+function CampaignScreen({ onSelect, onBack, profile }: { onSelect: (mission: CampaignMission) => void; onBack: () => void; profile: PlayerProfile }) {
+  const [progress, setProgress] = useState(() => { try { const s = localStorage.getItem('warGame_campaign'); return s ? JSON.parse(s) : { highestCompleted: 0, stars: {} as Record<number, number> }; } catch { return { highestCompleted: 0, stars: {} as Record<number, number> }; } });
+  const [starsPerMission] = useState<Record<number, number>>(() => { try { const s = localStorage.getItem('warGame_campaign'); const d = s ? JSON.parse(s) : null; return d?.stars || {}; } catch { return {}; } });
+  return (
+    <div className="min-h-screen p-4 md:p-6 overflow-y-auto" dir="rtl" style={{ background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)' }}>
+      <div className="max-w-3xl mx-auto space-y-4">
+        <div className="flex items-center justify-between"><h1 className="text-2xl font-bold text-white">⚔️ الحملة</h1><button onClick={onBack} className="py-2 px-4 rounded-lg bg-gray-700 text-white hover:bg-gray-600 cursor-pointer text-sm">→ رجوع</button></div>
+        <div className="text-gray-400 text-sm">أكمل المهام بالترتيب لفتح المهمة التالية</div>
+        {CAMPAIGN_MISSIONS.map(m => {
+          const unlocked = m.id === 1 || progress.highestCompleted >= m.id - 1;
+          const completed = progress.highestCompleted >= m.id;
+          const stars = starsPerMission[m.id] || 0;
+          return (
+            <button key={m.id} onClick={() => unlocked ? onSelect(m) : undefined} disabled={!unlocked} className={`w-full p-4 rounded-xl text-right cursor-pointer transition-all border-2 ${unlocked ? 'hover:scale-[1.02]' : 'opacity-40 cursor-not-allowed'}`} style={{ background: '#16213e', borderColor: completed ? '#27ae60' : unlocked ? '#f39c12' : '#333' }}>
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-white font-bold">{m.nameAr}</div>
+                  <div className="text-gray-400 text-xs mt-1">{m.desc}</div>
+                  <div className="flex gap-2 mt-2 text-xs">
+                    <span className="px-2 py-0.5 rounded" style={{ background: '#0f3460', color: '#f39c12' }}>{MAP_PRESET_INFO[m.mapPreset].icon} {MAP_PRESET_INFO[m.mapPreset].name}</span>
+                    <span className="px-2 py-0.5 rounded" style={{ background: '#0f3460', color: '#e74c3c' }}>{{ easy: 'سهل', normal: 'عادي', hard: 'صعب', legendary: 'أسطوري' }[m.difficulty]}</span>
+                    <span className="px-2 py-0.5 rounded" style={{ background: '#0f3460' }}>{AI_PERSONALITIES[m.aiPersonality].icon} {AI_PERSONALITIES[m.aiPersonality].nameAr}</span>
+                  </div>
+                  <div className="text-gray-500 text-xs mt-1">🎯 {m.objectives.join(' | ')} | 🏆 +{m.reward} XP</div>
+                </div>
+                <div className="text-left">
+                  {completed ? <div className="text-green-400 text-2xl">✅</div> : unlocked ? <div className="text-yellow-400 text-2xl">🔓</div> : <div className="text-gray-600 text-2xl">🔒</div>}
+                  {completed && <div className="text-yellow-400 mt-1">{'⭐'.repeat(stars)}{'☆'.repeat(3 - stars)}</div>}
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+function DailyChallengeScreen({ onStart, onBack }: { onStart: (d: Difficulty, p: MapPreset, a: AIPersonality) => void; onBack: () => void }) {
+  const daily = getDailyChallenge();
+  const [completed, setCompleted] = useState(() => { try { const d = localStorage.getItem('warGame_dailyCompleted'); const today = new Date(); const todayStr = `${today.getFullYear()}-${today.getMonth() + 1}-${today.getDate()}`; return d === todayStr; } catch { return false; } });
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center p-4" dir="rtl" style={{ background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)' }}>
+      <div className="max-w-md w-full space-y-4 text-center">
+        <div className="text-6xl">🎯</div>
+        <h1 className="text-3xl font-bold text-yellow-400">التحدي اليومي</h1>
+        <div className="p-4 rounded-xl" style={{ background: '#16213e', border: '2px solid #f39c12' }}>
+          <div className="text-white font-bold mb-2">إعدادات اليوم</div>
+          <div className="space-y-1 text-gray-300 text-sm">
+            <p>🗺️ {MAP_PRESET_INFO[daily.mapPreset].icon} {MAP_PRESET_INFO[daily.mapPreset].name}</p>
+            <p>⚡ {daily.difficulty === 'legendary' ? 'أسطوري' : daily.difficulty === 'hard' ? 'صعب' : 'عادي'}</p>
+            <p>{AI_PERSONALITIES[daily.aiPersonality].icon} {AI_PERSONALITIES[daily.aiPersonality].nameAr}</p>
+            <p className="text-yellow-400 font-bold">🏆 مكافأة: +{daily.bonusXP} XP (مضاعف!)</p>
+          </div>
+        </div>
+        {completed ? (
+          <div className="p-3 rounded-lg text-green-400" style={{ background: '#16213e' }}>✅ أكملت تحدي اليوم! عد غداً</div>
+        ) : (
+          <button onClick={() => onStart(daily.difficulty, daily.mapPreset, daily.aiPersonality)} className="w-full py-3 rounded-lg text-lg font-bold text-white cursor-pointer" style={{ background: 'linear-gradient(135deg, #f39c12, #e67e22)' }}>⚔️ ابدأ التحدي</button>
+        )}
+        <button onClick={onBack} className="py-2 px-6 rounded-lg text-gray-300 border border-gray-600 hover:bg-white/5 cursor-pointer text-sm">→ رجوع</button>
+      </div>
+    </div>
+  );
+}
+function MapSelectScreen({ onSelect, onBack, difficulty }: { onSelect: (preset: MapPreset, mapSize?: MapSize) => void; onBack: () => void; difficulty: Difficulty }) {
+  const [selectedSize, setSelectedSize] = useState<MapSize>('medium');
   const presets: MapPreset[] = ['classic', 'desert_storm', 'mountain_pass', 'island_hopping', 'forest_ambush', 'urban_warfare', 'river_crossing'];
   const terrainPreview: Record<MapPreset, { colors: string[] }> = {
     classic: { colors: ['#4a6741', '#1a5276', '#8b7355', '#2d5a27', '#c2a83e'] },
@@ -1606,12 +1809,19 @@ function MapSelectScreen({ onSelect, onBack, difficulty }: { onSelect: (preset: 
           <button onClick={onBack} className="py-2 px-4 rounded-lg bg-gray-700 text-white hover:bg-gray-600 cursor-pointer text-sm">→ رجوع</button>
         </div>
         <div className="text-gray-400 text-sm">الصعوبة: {{ easy: 'جندي', normal: 'قائد', hard: 'استراتيجي', legendary: 'أستاذ الحرب' }[difficulty]}</div>
+        <div className="flex gap-2 mb-2">
+          {(['small', 'medium', 'large'] as MapSize[]).map(sz => (
+            <button key={sz} onClick={() => setSelectedSize(sz)} className={`flex-1 py-2 px-3 rounded-lg text-sm font-bold cursor-pointer border-2 transition-all ${selectedSize === sz ? 'scale-105' : ''}`} style={{ borderColor: selectedSize === sz ? '#f39c12' : '#333', background: selectedSize === sz ? '#f39c1233' : '#16213e', color: selectedSize === sz ? '#f39c12' : '#999' }}>
+              {MAP_SIZES[sz].icon} {MAP_SIZES[sz].nameAr} ({MAP_SIZES[sz].cols}×{MAP_SIZES[sz].rows})
+            </button>
+          ))}
+        </div>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
           {presets.map(preset => {
             const info = MAP_PRESET_INFO[preset];
             const preview = terrainPreview[preset];
             return (
-              <button key={preset} onClick={() => onSelect(preset)} className="rounded-xl p-4 text-right cursor-pointer transition-all hover:scale-105 border-2" style={{ background: '#16213e', borderColor: info.color + '66' }}>
+              <button key={preset} onClick={() => onSelect(preset, selectedSize)} className="rounded-xl p-4 text-right cursor-pointer transition-all hover:scale-105 border-2" style={{ background: '#16213e', borderColor: info.color + '66' }}>
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-2xl">{info.icon}</span>
                   <div>
@@ -1702,14 +1912,27 @@ function GameOverScreen({ state, onRestart, onProfile }: { state: GameState; onR
     xp += state.strategicPointsCaptured * 15;
     if (state.tacticsUsed.length >= 2) xp += 10;
     const prevLevel = p.level;
-    const newP = addXP(p, xp);
+    let xpMult = 1;
+    if (isWin && state.gameMode === 'daily') xpMult = 2;
+    if (isWin && state.gameMode === 'campaign') xpMult = 1.5;
+    const finalXp = Math.round(xp * xpMult);
+    const newP = addXP(p, finalXp);
+    if (isWin) { if (state.soundEnabled !== false) { try { playSound('victory'); } catch {} } } else { try { playSound('defeat'); } catch {} }
+    // Campaign progress
+    if (isWin && state.gameMode === 'campaign' && state.campaignMission) {
+      try { const prev = JSON.parse(localStorage.getItem('warGame_campaign') || '{"highestCompleted":0,"stars":{}}'); const stars = state.playerLostNoUnits ? 3 : state.totalDamageDealt > state.totalDamageReceived * 2 ? 2 : 1; if (state.campaignMission > prev.highestCompleted) prev.highestCompleted = state.campaignMission; if ((prev.stars[state.campaignMission] || 0) < stars) prev.stars[state.campaignMission] = stars; localStorage.setItem('warGame_campaign', JSON.stringify(prev)); } catch {}
+    }
+    // Daily completion
+    if (isWin && state.gameMode === 'daily') {
+      try { const today = new Date(); localStorage.setItem('warGame_dailyCompleted', `${today.getFullYear()}-${today.getMonth() + 1}-${today.getDate()}`); } catch {}
+    }
     newP.totalGames++;
     newP.totalKills += state.playerUnitsKilled;
     newP.totalDamageDealt += state.totalDamageDealt;
     if (isWin) newP.totalWins++; else newP.totalLosses++;
     saveProfile(newP);
     setProfile(newP);
-    setXpAwarded(xp);
+    setXpAwarded(finalXp);
     setLevelUp(newP.level > prevLevel);
   }, []);
   const playerSPCount = state.grid.flat().filter(c => c.strategicPoint && c.strategicOwner === 'player').length;
@@ -1720,7 +1943,7 @@ function GameOverScreen({ state, onRestart, onProfile }: { state: GameState; onR
         <h1 className="text-3xl font-bold" style={{ color: isWin ? '#53d769' : '#e94560' }}>{isWin ? '🎉 انتصار!' : '💀 هزيمة!'}</h1>
         <div className="text-2xl">{'⭐'.repeat(stars)}{'☆'.repeat(5 - stars)}</div>
         <div className="text-gray-300 text-sm space-y-1">
-          <p>📅 الدور: {state.turn} | 🗺️ {MAP_PRESET_INFO[state.mapPreset].name} | {isWin ? '🏆 انتصار' : '💀 هزيمة'}</p>
+          <p>📅 الدور: {state.turn} | 🗺️ {MAP_PRESET_INFO[state.mapPreset].name} | {isWin ? '🏆 انتصار' : '💀 هزيمة'} {state.gameMode === 'campaign' ? '| ⚔️ حملة' : ''} {state.gameMode === 'daily' ? '| 🎯 تحدي يومي (×2 XP)' : ''}</p>
           <p>⚔️ وحدات دُمرت: {state.playerUnitsKilled} | وحدات خُسرت: {state.aiUnitsKilled}</p>
           <p>💥 ضرر أُلحق: {state.totalDamageDealt} | 🛡️ ضرر استُقبل: {state.totalDamageReceived}</p>
           <p>🏛️ نقاط استراتيجية: {state.strategicPointsCaptured} محتلة</p>
@@ -1768,6 +1991,8 @@ function GameHeader({ state, dispatch }: { state: GameState; dispatch: React.Dis
         {aiSPCount > 0 && <span className="text-red-400" title="نقاط استراتيجية للعدو">🏛️ {aiSPCount}</span>}
       </div>
       <div className="flex items-center gap-1 flex-wrap">
+        <button onClick={() => dispatch({ type: 'TOGGLE_SOUND' })} className="px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer" title="صوت">{state.soundEnabled ? '🔊' : '🔇'}</button>
+        {state.aiPersonality && <span className="text-xs px-1 py-0.5 rounded" style={{ background: '#0f3460', fontSize: '10px' }} title="شخصية العدو">{AI_PERSONALITIES[state.aiPersonality].icon}</span>}
         <button onClick={() => dispatch({ type: 'TOGGLE_STATS' })} className={`px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer ${state.showStats ? 'ring-1 ring-yellow-400' : ''}`} title="إحصائيات">📊</button>
         <div className="text-gray-300 px-2 py-1 rounded" style={{ background: '#0f3460' }}>{phaseNames[state.phase]}</div>
         {tactic && <div className="text-yellow-400 px-2 py-1 rounded" style={{ background: '#0f3460', fontSize: '10px' }}>{tactic.name}</div>}
@@ -1790,8 +2015,9 @@ function GameHeader({ state, dispatch }: { state: GameState; dispatch: React.Dis
   );
 }
 function HexGridComp({ state, dispatch }: { state: GameState; dispatch: React.Dispatch<Action> }) {
-  const svgW = COLS * HEX_SIZE * 1.5 + HEX_SIZE + 20;
-  const svgH = ROWS * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20;
+  const scale = COLS <= 11 ? 1.15 : COLS >= 16 ? 0.8 : 1;
+  const svgW = (COLS * HEX_SIZE * 1.5 + HEX_SIZE + 20) * scale;
+  const svgH = (ROWS * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20) * scale;
   const tactic = TACTICS.find(t => t.id === state.playerTactic) ?? null;
   const secondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic) ?? null;
   const validMoveSet = new Set(state.validMoves.map(([c, r]) => `${c},${r}`));
@@ -1809,7 +2035,8 @@ function HexGridComp({ state, dispatch }: { state: GameState; dispatch: React.Di
   }
   return (
     <div className={`relative rounded-xl overflow-auto ${state.shakeKey % 2 === 1 ? 'animate-shake' : ''}`} style={{ background: '#0d1117', border: '2px solid #1e3a5f', maxHeight: '60vh' }}>
-      <svg width={svgW} height={svgH} viewBox={`0 0 ${svgW} ${svgH}`} className="block" style={{ minWidth: svgW }}>
+      <svg width={svgW} height={svgH} viewBox={`0 0 ${(COLS * HEX_SIZE * 1.5 + HEX_SIZE + 20)} ${(ROWS * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20)}`} className="block" style={{ minWidth: svgW }}>
+        <g transform={`scale(${scale})`}>
         <defs>
           <filter id="glow"><feGaussianBlur stdDeviation="3" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
           <filter id="selGlow"><feGaussianBlur stdDeviation="4" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
@@ -1842,6 +2069,7 @@ function HexGridComp({ state, dispatch }: { state: GameState; dispatch: React.Di
               {isFog && <text x={cx} y={cy + 4} textAnchor="middle" fontSize="10" fill="#333" style={{ pointerEvents: 'none' }}>?</text>}
               {!isFog && <text x={cx} y={cy + HEX_SIZE * 0.35} textAnchor="middle" fontSize="10" style={{ pointerEvents: 'none' }}>{terrain.icon}</text>}
               {!isFog && bldg && <text x={cx - 8} y={cy - HEX_SIZE * 0.25} textAnchor="middle" fontSize="10" style={{ pointerEvents: 'none' }}>{bldg.icon}</text>}
+              {!isFog && bldg && cell.buildingLevel > 1 && <text x={cx + 10} y={cy - HEX_SIZE * 0.35} textAnchor="middle" fontSize="6" fill="#ffd700" style={{ pointerEvents: 'none' }}>{'⭐'.repeat(cell.buildingLevel - 1)}</text>}
               {!isFog && bldg && cell.buildingOwner && <circle cx={cx + 8} cy={cy - HEX_SIZE * 0.3} r={3} fill={cell.buildingOwner === 'player' ? '#27ae60' : '#c0392b'} style={{ pointerEvents: 'none' }} />}
               {cell.strategicPoint && !isFog && (() => {
                 const spDef = STRATEGIC_POINT_DEFS[cell.strategicPoint];
@@ -1879,6 +2107,7 @@ function HexGridComp({ state, dispatch }: { state: GameState; dispatch: React.Di
           const r = fx.type === 'explosion' ? 15 + age * 20 : 10 + age * 10;
           return <circle key={fx.id} cx={cx} cy={cy} r={r} fill="none" stroke={fx.type === 'heal' ? '#2ecc71' : '#e74c3c'} strokeWidth={3 * opacity} opacity={opacity} style={{ pointerEvents: 'none' }} />;
         })}
+        </g>
       </svg>
       {state.hoverHex && !!(state.revealed[state.hoverHex[0]]?.[state.hoverHex[1]]) && <HexTooltip state={state} col={state.hoverHex[0]} row={state.hoverHex[1]} />}
     </div>
@@ -1892,7 +2121,7 @@ function HexTooltip({ state, col, row }: { state: GameState; col: number; row: n
   return (
     <div className="absolute z-50 p-2 rounded-lg text-xs text-white pointer-events-none" style={{ background: 'rgba(22,33,62,0.95)', border: '1px solid #0f3460', left: `${(cx / (COLS * HEX_SIZE * 1.5 + HEX_SIZE + 20)) * 100}%`, top: `${(cy / (ROWS * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20)) * 100}%`, transform: 'translate(-50%, -120%)' }}>
       <div className="font-bold">{terrain.icon} {terrain.nameAr} | دفاع: {terrain.defBonus > 0 ? '+' : ''}{Math.round(terrain.defBonus * 100)}%</div>
-      {bldg && <div className="text-yellow-400">{bldg.icon} {bldg.nameAr}: {bldg.desc}</div>}
+      {bldg && <div className="text-yellow-400">{bldg.icon} {bldg.nameAr}: {bldg.desc} {'⭐'.repeat(cell.buildingLevel)}</div>}
       {cell.strategicPoint && (() => { const spDef = STRATEGIC_POINT_DEFS[cell.strategicPoint]; const ownerName = cell.strategicOwner === 'player' ? 'أنت' : cell.strategicOwner === 'ai' ? 'عدو' : 'محايد'; return <div style={{ color: spDef.color }}>{spDef.icon} {spDef.nameAr} ({ownerName}): {spDef.desc}</div>; })()}
       {unit && (unit.owner === 'player' || state.revealed[col]?.[row]) && (
         <div className="mt-1 pt-1 border-t border-gray-600">
@@ -2008,6 +2237,21 @@ function TacticSelector({ state, dispatch }: { state: GameState; dispatch: React
         )}
         {state.playerBuildCount >= 1 && <p className="text-orange-400 text-xs mt-1">⚠️ بناء واحد فقط لكل دور</p>}
       </div>
+      {(state.phase === 'movement' || state.phase === 'attack') && (() => {
+        const hasEngineer = state.units.some(u => u.owner === 'player' && u.type === 'engineers' && u.hp > 0);
+        if (!hasEngineer) return null;
+        const hasUpgradable = state.grid.flat().some(c => c.building && c.buildingOwner === 'player' && c.buildingLevel < 3);
+        if (!hasUpgradable) return null;
+        return (
+          <div className="border-t border-gray-700 pt-2 mt-2">
+            <div className="text-white font-bold text-xs mb-1">⬆️ ترقية المباني (المهندسين)</div>
+            <button onClick={() => dispatch({ type: 'ENTER_UPGRADE_MODE' })} className={`w-full py-1.5 rounded text-xs font-bold text-white cursor-pointer ${state.upgradeMode ? 'ring-2 ring-yellow-400' : ''}`} style={{ background: state.upgradeMode ? '#0f3460' : 'linear-gradient(135deg, #f39c12, #e67e22)' }}>
+              {state.upgradeMode ? '🎯 اختر مبنى للترقية' : '⬆️ ترقية مبنى'}
+            </button>
+            {state.upgradeMode && <p className="text-yellow-400 text-xs mt-1 text-center">انقر على مبنى مجاور للمهندس | <button onClick={() => dispatch({ type: 'EXIT_UPGRADE_MODE' })} className="text-red-400 underline">إلغاء</button></p>}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -2210,8 +2454,12 @@ export default function WarGame() {
       return () => clearTimeout(timer);
     }
   }, [state.phase, state.animating]);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  useEffect(() => { try { const s = localStorage.getItem('warGame_sound'); setSoundEnabled(s !== 'false'); } catch {} }, []);
   if (state.screen === 'menu') return <MainMenu onStart={(d) => { setPendingDifficulty(d); dispatch({ type: 'SET_SCREEN', screen: 'map_select' }); }} onHelp={() => dispatch({ type: 'SET_SCREEN', screen: 'how_to_play' })} onLoad={() => dispatch({ type: 'LOAD_GAME', slot: 0 })} onProfile={() => { setProfile(loadProfile()); dispatch({ type: 'SET_SCREEN', screen: 'profile' }); }} profile={profile} />;
-  if (state.screen === 'map_select') return <MapSelectScreen onSelect={(preset) => dispatch({ type: 'START_GAME', difficulty: pendingDifficulty, mapPreset: preset })} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} difficulty={pendingDifficulty} />;
+  if (state.screen === 'map_select') return <MapSelectScreen onSelect={(preset, mapSize) => dispatch({ type: 'START_GAME', difficulty: pendingDifficulty, mapPreset: preset, mapSize: mapSize || 'medium' })} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} difficulty={pendingDifficulty} />;
+  if (state.screen === 'campaign') return <CampaignScreen onSelect={(m) => dispatch({ type: 'START_GAME', difficulty: m.difficulty, mapPreset: m.mapPreset, aiPersonality: m.aiPersonality, gameMode: 'campaign', campaignMission: m.id })} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} profile={profile} />;
+  if (state.screen === 'daily') return <DailyChallengeScreen onStart={(d, p, a) => { try { localStorage.removeItem('warGame_dailyCompleted'); } catch {} dispatch({ type: 'START_GAME', difficulty: d, mapPreset: p, aiPersonality: a, gameMode: 'daily' }); }} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} />;
   if (state.screen === 'how_to_play') return <HowToPlay onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} />;
   if (state.screen === 'profile') return <ProfileScreen profile={profile} setProfile={setProfile} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} />;
   if (state.screen === 'game_over') return <GameOverScreen state={state} onRestart={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} onProfile={() => { setProfile(loadProfile()); dispatch({ type: 'SET_SCREEN', screen: 'profile' }); }} />;
