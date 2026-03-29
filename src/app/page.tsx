@@ -492,9 +492,9 @@ function makeGrid(): HexCell[][] {
 function generateStrategicPoints(grid: HexCell[][]): HexCell[][] {
   const newGrid = grid.map(col => col.map(cell => ({ ...cell })));
   const types: StrategicPointType[] = ['supply_cache', 'weapons_depot', 'training_camp', 'gold_mine', 'command_post'];
-  const count = 4 + Math.floor(Math.random() * 3); const placed: [number, number][] = [];
+  const count = 3 + Math.floor(COLS * ROWS / 35); const placed: [number, number][] = [];
   for (let i = 0; i < count; i++) { for (let attempt = 0; attempt < 100; attempt++) {
-    const c = 3 + Math.floor(Math.random() * 8); const r = Math.floor(Math.random() * ROWS);
+    const c = 2 + Math.floor(Math.random() * (COLS - 4)); const r = Math.floor(Math.random() * ROWS);
     const terrain = newGrid[c][r].terrain;
     if (terrain === 'water' || terrain === 'mountain') continue;
     if (newGrid[c][r].building || newGrid[c][r].strategicPoint) continue;
@@ -635,22 +635,23 @@ function getWeather(): WeatherType { const r = Math.random(); return r < 0.4 ? '
 function processStatusEffects(units: Unit[], log: LogEntry[], turn: number): { units: Unit[]; log: LogEntry[] } {
   let newUnits = units.map(u => ({ ...u, statusEffects: [...u.statusEffects] }));
   const newLog = [...log];
-  for (const unit of newUnits) {
+  for (let idx = 0; idx < newUnits.length; idx++) {
+    const unit = newUnits[idx];
     if (unit.hp <= 0 || unit.isFake) continue;
     const newEffects: StatusEffect[] = [];
+    let newHp = unit.hp;
     for (const effect of unit.statusEffects) {
-      // Entrenched units resist frozen
       if (effect.type === 'frozen' && unit.entrenched) { newLog.push({ turn, msg: `🧊 ${UNIT_DEFS[unit.type].nameAr} مقاوم التجمد (محصّن)!`, type: 'system' }); continue; }
       switch (effect.type) {
-        case 'burning': unit.hp = Math.max(0, unit.hp - 8); newLog.push({ turn, msg: `🔥 ${UNIT_DEFS[unit.type].nameAr} يحترق! -8 HP`, type: 'system' }); break;
-        case 'poisoned': unit.hp = Math.max(0, unit.hp - 5); newLog.push({ turn, msg: `☠️ ${UNIT_DEFS[unit.type].nameAr} مسموم! -5 HP`, type: 'system' }); break;
+        case 'burning': newHp = Math.max(0, newHp - 8); newLog.push({ turn, msg: `🔥 ${UNIT_DEFS[unit.type].nameAr} يحترق! -8 HP`, type: 'system' }); break;
+        case 'poisoned': newHp = Math.max(0, newHp - 5); newLog.push({ turn, msg: `☠️ ${UNIT_DEFS[unit.type].nameAr} مسموم! -5 HP`, type: 'system' }); break;
         case 'frozen': newLog.push({ turn, msg: `🧊 ${UNIT_DEFS[unit.type].nameAr} متجمد! لا يستطيع التحرك`, type: 'system' }); break;
         case 'stunned': newLog.push({ turn, msg: `💫 ${UNIT_DEFS[unit.type].nameAr} مصدوم! يتخطى دوره`, type: 'system' }); break;
       }
       const remaining = effect.turnsLeft - 1;
       if (remaining > 0) newEffects.push({ ...effect, turnsLeft: remaining });
     }
-    unit.statusEffects = newEffects;
+    newUnits[idx] = { ...unit, hp: newHp, statusEffects: newEffects };
   }
   return { units: newUnits.filter(u => u.hp > 0 || u.isFake), log: newLog };
 }
@@ -677,10 +678,11 @@ function checkVictoryCondition(state: GameState, units: Unit[]): Owner | null {
   if (aiAlive === 0 && state.victoryType !== 'survival') return 'player';
   if (playerAlive === 0) return 'ai';
   if (state.victoryType === 'hq_capture') {
-    const playerHQ = state.grid.flat().some(c => c.building === 'hq' && c.buildingOwner === 'ai' && c.strategicOwner === 'player');
-    if (playerHQ) return 'player';
-    const aiHQ = state.grid.flat().some(c => c.building === 'hq' && c.buildingOwner === 'player' && c.strategicOwner === 'ai');
-    if (aiHQ) return 'ai';
+    // Player wins if they have a unit on the AI's HQ (right half of map)
+    const aiHQCell = state.grid.flat().find(c => c.building === 'hq' && c.col >= COLS / 2);
+    const playerHQCell = state.grid.flat().find(c => c.building === 'hq' && c.col < COLS / 2);
+    if (aiHQCell && units.some(u => u.owner === 'player' && !u.isFake && u.hp > 0 && u.col === aiHQCell.col && u.row === aiHQCell.row)) return 'player';
+    if (playerHQCell && units.some(u => u.owner === 'ai' && !u.isFake && u.hp > 0 && u.col === playerHQCell.col && u.row === playerHQCell.row)) return 'ai';
   }
   if (state.victoryType === 'survival' && state.turn >= 20 && playerAlive > 0) return 'player';
   return null;
@@ -877,13 +879,12 @@ function handleAbilityUse(state: GameState, unitId: string): GameState {
     return { ...state, units: newUnits, log, effects: [...state.effects, ...enemies.map(e => ({ id: `fx_dest_${Date.now()}`, col: e.col, row: e.row, type: 'explosion' as const, startTime: Date.now() }))], shakeKey: state.shakeKey + 1 };
   }
   else if (unit.type === 'transport_ship') {
-    if (unit.carriedUnitId) { log.push({ turn: state.turn, msg: '🛳️ لا يمكن الإنزال - السفينة محملة', type: 'info' }); return state; }
+    newUnit.abilityActive = true;
+    newUnit.abilityActiveTurns = 1;
     newUnit.abilityCooldownLeft = def.abilityCooldown;
-    log.push({ turn: state.turn, msg: `🛳️ ${def.nameAr} إنزال! اختر موقع الإنزال المجاور`, type: 'tactic' });
-    // Mark deploy mode for adjacent land
     const deployable = getNeighbors(unit.col, unit.row).filter(([c, r]) => { const t = getTerrainAt(state.grid, c, r); return t !== 'water' && t !== 'mountain' && !getUnitAt(state.units, c, r); });
-    if (deployable.length === 0) { log.push({ turn: state.turn, msg: '🛳️ لا يوجد مواقع للإنزال!', type: 'info' }); newUnit.abilityCooldownLeft = 0; }
-    else { log.push({ turn: state.turn, msg: `🛳️ انقر موقع الإنزال (${deployable.length} خيارات)`, type: 'info' }); }
+    if (deployable.length === 0) { log.push({ turn: state.turn, msg: '🛳️ لا يوجد مواقع للإنزال!', type: 'info' }); newUnit.abilityActive = false; newUnit.abilityCooldownLeft = 0; return state; }
+    log.push({ turn: state.turn, msg: `🛳️ ${def.nameAr} إنزال! اختر موقع الإنزال المجاور (${deployable.length} خيارات)`, type: 'tactic' });
   }
   newUnits = state.units.map(u => u.id === unitId ? newUnit : u);
   return { ...state, units: newUnits, log };
@@ -964,7 +965,7 @@ function handleHexClick(state: GameState, col: number, row: number): GameState {
     if (state.selectedId) {
       const sel = state.units.find(u => u.id === state.selectedId);
       // Transport ship deploy handling
-      if (sel && sel.type === 'transport_ship' && sel.abilityActive && sel.abilityCooldownLeft === UNIT_DEFS.transport_ship.abilityCooldown - 1) {
+      if (sel && sel.type === 'transport_ship' && sel.abilityActive) {
         const t = getTerrainAt(state.grid, col, row);
         if (t !== 'water' && t !== 'mountain' && !getUnitAt(state.units, col, row)) {
           const deployTypes: UnitType[] = ['infantry', 'medics', 'engineers'];
@@ -1108,7 +1109,7 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
     // Deploy unit - naval on water, air anywhere, others on land
     const isNaval = isNavalUnit(type); const isAir = isAirUnit(type);
     let deployed = false;
-    for (let c = 13; c >= 11 && !deployed; c--) { for (let r = 0; r < ROWS && !deployed; r++) {
+    for (let c = COLS - 1; c >= COLS - 3 && !deployed; c--) { for (let r = 0; r < ROWS && !deployed; r++) {
       const terrain = state.grid[c][r].terrain;
       const validTerrain = isNaval ? terrain === 'water' || terrain === 'beach' : isAir ? terrain !== 'mountain' : terrain !== 'water' && terrain !== 'mountain';
       if (!getUnitAt(units, c, r) && validTerrain) {
@@ -1169,7 +1170,7 @@ function handleAIComplete(state: GameState): GameState {
   if (newTurn % 5 === 0 && newTurn > 1) {
     const playerSpawns = findSafeSpawn(newGrid, stormDmg, [0, 3], 'player');
     if (playerSpawns.length > 0) { const pTypes: UnitType[] = ['infantry', 'armor', 'medics']; const pType = pTypes[Math.floor(Math.random() * pTypes.length)]; const [pc, pr] = playerSpawns[Math.floor(Math.random() * playerSpawns.length)]; stormDmg = [...stormDmg, { ...createUnit(Date.now() + 9000, pType, 'player', pc, pr), moved: true, attacked: true }]; reinforcementLog.push({ turn: newTurn, msg: `📢 إمداد! ${UNIT_DEFS[pType].nameAr}!`, type: 'system' }); }
-    const aiSpawns = findSafeSpawn(newGrid, stormDmg, [10, 13], 'ai');
+    const aiSpawns = findSafeSpawn(newGrid, stormDmg, [COLS - 4, COLS - 1], 'ai');
     if (aiSpawns.length > 0) { const aTypes: UnitType[] = ['infantry', 'armor', 'medics']; const aType = aTypes[Math.floor(Math.random() * aTypes.length)]; const [ac, ar] = aiSpawns[Math.floor(Math.random() * aiSpawns.length)]; stormDmg = [...stormDmg, { ...createUnit(Date.now() + 9001, aType, 'ai', ac, ar), moved: true, attacked: true }]; reinforcementLog.push({ turn: newTurn, msg: `📢 إمداد العدو!`, type: 'system' }); }
   }
   const revealed = state.revealed.map(r => [...r]);
@@ -1288,7 +1289,7 @@ function DailyChallengeScreen({ onStart, onBack }: { onStart: (d: Difficulty, p:
     </div>
   );
 }
-function MapSelectScreen({ onSelect, onBack, difficulty }: { onSelect: (preset: MapPreset, mapSize?: MapSize, victoryType?: VictoryType) => void; onBack: () => void; difficulty: Difficulty }) {
+function MapSelectScreen({ onSelect, onBack, difficulty }: { onSelect: (preset: MapPreset, mapSize?: MapSize, victoryType?: VictoryType, customGrid?: HexCell[][]) => void; onBack: () => void; difficulty: Difficulty }) {
   const [selectedSize, setSelectedSize] = useState<MapSize>('medium');
   const [selectedVictory, setSelectedVictory] = useState<VictoryType>('annihilation');
   const presets: MapPreset[] = ['classic', 'desert_storm', 'mountain_pass', 'island_hopping', 'forest_ambush', 'urban_warfare', 'river_crossing'];
@@ -1331,7 +1332,7 @@ function MapSelectScreen({ onSelect, onBack, difficulty }: { onSelect: (preset: 
           <div className="p-3 rounded-lg" style={{ background: '#16213e', border: '1px solid #9b59b6' }}>
             <div className="text-purple-400 font-bold text-sm mb-2">🗺️ خرائط مخصصة</div>
             <div className="space-y-2">
-              {customMaps.map((m, i) => (<button key={i} onClick={() => onSelect('classic' as MapPreset, selectedSize, selectedVictory)} className="w-full p-2 rounded-lg text-xs text-right cursor-pointer border border-purple-500 hover:bg-white/5" style={{ background: '#0d1117' }}>🗺️ {m.name}</button>))}
+              {customMaps.map((m, i) => (<button key={i} onClick={() => onSelect('classic' as MapPreset, undefined, selectedVictory, m.grid)} className="w-full p-2 rounded-lg text-xs text-right cursor-pointer border border-purple-500 hover:bg-white/5" style={{ background: '#0d1117' }}>🗺️ {m.name}</button>))}
             </div>
           </div>
         )}
@@ -1623,7 +1624,7 @@ function HexGridComp({ state, dispatch }: { state: GameState; dispatch: React.Di
           const isValidAttack = validAttackSet.has(`${ci},${ri}`);
           const isHovered = state.hoverHex?.[0] === ci && state.hoverHex?.[1] === ri;
           const deployColLimit = state.deployMode ? Math.max(2, state.units.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).reduce((max, u) => Math.max(max, u.col), 0) + 1) : 2;
-          const isDeploy = state.deployMode && ci <= deployColLimit && !unit && cell.terrain !== 'water' && cell.terrain !== 'mountain';
+          const isDeploy = state.deployMode && ci <= deployColLimit && !unit && (isAirUnit(state.deployMode) ? cell.terrain !== 'water' : cell.terrain !== 'water' && cell.terrain !== 'mountain');
           const isValidBuild = validBuildSet.has(`${ci},${ri}`);
           const isBuildHover = state.buildMode && state.hoverHex?.[0] === ci && state.hoverHex?.[1] === ri && isValidBuild;
           const showEnemy = unit && unit.owner === 'ai' && !unit.isFake && isRevealed;
@@ -1760,7 +1761,7 @@ function TacticSelector({ state, dispatch }: { state: GameState; dispatch: React
       <div className="border-t border-gray-700 pt-2 mt-2">
         <div className="text-white font-bold text-xs mb-1">🏗️ بناء المباني</div>
         <div className="grid grid-cols-2 gap-1">
-          {BUILDABLE_TYPES.map(bt => { const bd = BUILDING_DEFS[bt]; const cost = BUILDING_COSTS[bt]; const canAfford = state.player.supply >= cost; const hasEngineer = state.units.some(u => u.owner === 'player' && u.type === 'engineers' && u.hp > 0); const canBuild = canAfford && hasEngineer && state.playerBuildCount < 1; return (<button key={bt} onClick={() => canBuild ? dispatch({ type: 'ENTER_BUILD_MODE', buildingType: bt }) : undefined} disabled={!canBuild} className={`p-1.5 rounded text-xs text-right cursor-pointer ${!canBuild ? 'opacity-40' : 'hover:bg-white/5'}`} style={{ background: '#1a2332' }}><div className="text-sm">{bd.icon} {bd.nameAr}</div><div className="text-gray-400" style={{ fontSize: '9px' }}>{bd.desc}</div><div className="text-yellow-400" style={{ fontSize: '9px' }}>📦 {cost}</div></button>); })}
+          {BUILDABLE_TYPES.map(bt => { const bd = BUILDING_DEFS[bt]; const cost = BUILDING_COSTS[bt]; const canAfford = state.player.supply >= cost; const hasEngineer = state.units.some(u => u.owner === 'player' && u.type === 'engineers' && u.hp > 0); const profile = loadProfile(); const maxBuilds = profile.unlockedPerks.includes('rapid_build') ? 2 : 1; const canBuild = canAfford && hasEngineer && state.playerBuildCount < maxBuilds; return (<button key={bt} onClick={() => canBuild ? dispatch({ type: 'ENTER_BUILD_MODE', buildingType: bt }) : undefined} disabled={!canBuild} className={`p-1.5 rounded text-xs text-right cursor-pointer ${!canBuild ? 'opacity-40' : 'hover:bg-white/5'}`} style={{ background: '#1a2332' }}><div className="text-sm">{bd.icon} {bd.nameAr}</div><div className="text-gray-400" style={{ fontSize: '9px' }}>{bd.desc}</div><div className="text-yellow-400" style={{ fontSize: '9px' }}>📦 {cost}</div></button>); })}
         </div>
       </div>
     </div>
@@ -1808,6 +1809,12 @@ function MapEditorScreen({ onBack, onPlay }: { onBack: () => void; onPlay: (grid
   const [editorGrid, setEditorGrid] = useState<HexCell[][]>(() => makeGrid());
   const [mapName, setMapName] = useState('خريطة مخصصة');
   const savedMaps = useState(() => { try { const s = localStorage.getItem('warGame_customMaps'); return s ? JSON.parse(s) : []; } catch { return []; } });
+  const handleResize = (newCols: number, newRows: number) => {
+    setEditorCols(newCols); setEditorRows(newRows);
+    const newGrid: HexCell[][] = [];
+    for (let c = 0; c < newCols; c++) { newGrid[c] = []; for (let r = 0; r < newRows; r++) { newGrid[c][r] = { col: c, row: r, terrain: 'plains', building: null, buildingOwner: null, strategicPoint: null, strategicOwner: null, garrisonTurn: 0, buildingLevel: 1 }; } }
+    setEditorGrid(newGrid);
+  };
   const handleHexClick = (col: number, row: number) => {
     setEditorGrid(prev => prev.map(c => c.map(cell => {
       if (cell.col !== col || cell.row !== row) return cell;
@@ -1841,8 +1848,8 @@ function MapEditorScreen({ onBack, onPlay }: { onBack: () => void; onPlay: (grid
         <div className="flex items-center justify-between"><h1 className="text-2xl font-bold text-white">🗺️ محرر الخرائط</h1><button onClick={onBack} className="py-2 px-4 rounded-lg bg-gray-700 text-white hover:bg-gray-600 cursor-pointer text-sm">→ رجوع</button></div>
         <div className="flex flex-wrap gap-2 items-center">
           <input value={mapName} onChange={e => setMapName(e.target.value)} className="bg-gray-800 text-white px-3 py-1.5 rounded text-sm" placeholder="اسم الخريطة" />
-          <select value={editorCols} onChange={e => { setEditorCols(Number(e.target.value)); setEditorGrid(makeGrid()); }} className="bg-gray-800 text-white px-2 py-1.5 rounded text-sm"><option value={10}>10 أعمدة</option><option value={14}>14 أعمدة</option><option value={18}>18 عمود</option></select>
-          <select value={editorRows} onChange={e => { setEditorRows(Number(e.target.value)); setEditorGrid(makeGrid()); }} className="bg-gray-800 text-white px-2 py-1.5 rounded text-sm"><option value={8}>8 صفوف</option><option value={10}>10 صفوف</option><option value={12}>12 صف</option></select>
+          <select value={editorCols} onChange={e => handleResize(Number(e.target.value), editorRows)} className="bg-gray-800 text-white px-2 py-1.5 rounded text-sm"><option value={10}>10 أعمدة</option><option value={14}>14 أعمدة</option><option value={18}>18 عمود</option></select>
+          <select value={editorRows} onChange={e => handleResize(editorCols, Number(e.target.value))} className="bg-gray-800 text-white px-2 py-1.5 rounded text-sm"><option value={8}>8 صفوف</option><option value={10}>10 صفوف</option><option value={12}>12 صف</option></select>
           <button onClick={handleClear} className="py-1.5 px-3 rounded bg-red-600 text-white text-sm cursor-pointer hover:bg-red-500">🗑️ مسح</button>
           <button onClick={handleSave} className="py-1.5 px-3 rounded bg-green-600 text-white text-sm cursor-pointer hover:bg-green-500">💾 حفظ</button>
           <button onClick={handlePlay} className="py-1.5 px-3 rounded bg-blue-600 text-white text-sm cursor-pointer hover:bg-blue-500">▶️ العب</button>
@@ -1898,7 +1905,7 @@ export default function WarGame() {
     dispatch({ type: 'START_GAME', difficulty: pendingDifficulty, mapPreset: 'classic', mapSize: 'medium', customGrid: grid });
   }, [pendingDifficulty]);
   if (state.screen === 'menu') return <MainMenu onStart={(d) => { setPendingDifficulty(d); dispatch({ type: 'SET_SCREEN', screen: 'map_select' }); }} onHelp={() => dispatch({ type: 'SET_SCREEN', screen: 'how_to_play' })} onLoad={() => dispatch({ type: 'LOAD_GAME', slot: 0 })} onProfile={() => { setProfile(loadProfile()); dispatch({ type: 'SET_SCREEN', screen: 'profile' }); }} onMapEditor={() => dispatch({ type: 'SET_SCREEN', screen: 'map_editor' })} profile={profile} />;
-  if (state.screen === 'map_select') return <MapSelectScreen onSelect={(preset, mapSize, victoryType) => dispatch({ type: 'START_GAME', difficulty: pendingDifficulty, mapPreset: preset, mapSize: mapSize || 'medium', victoryType: victoryType || 'annihilation' })} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} difficulty={pendingDifficulty} />;
+  if (state.screen === 'map_select') return <MapSelectScreen onSelect={(preset, mapSize, victoryType, customGrid) => dispatch({ type: 'START_GAME', difficulty: pendingDifficulty, mapPreset: customGrid ? 'classic' : preset, mapSize: mapSize || 'medium', victoryType: victoryType || 'annihilation', customGrid: customGrid || undefined })} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} difficulty={pendingDifficulty} />;
   if (state.screen === 'map_editor') return <MapEditorScreen onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} onPlay={handleCustomMapPlay} />;
   if (state.screen === 'campaign') return <CampaignScreen onSelect={(m) => dispatch({ type: 'START_GAME', difficulty: m.difficulty, mapPreset: m.mapPreset, aiPersonality: m.aiPersonality, gameMode: 'campaign', campaignMission: m.id })} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} profile={profile} />;
   if (state.screen === 'daily') return <DailyChallengeScreen onStart={(d, p, a) => dispatch({ type: 'START_GAME', difficulty: d, mapPreset: p, aiPersonality: a, gameMode: 'daily' })} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} />;
