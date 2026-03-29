@@ -43,6 +43,7 @@ interface GameState {
   buildMode: BuildingType | null;
   validBuildPlacements: [number, number][];
   playerBuildCount: number;
+  playerDeployCount: number;
 }
 type Action =
   | { type: 'START_GAME'; difficulty: Difficulty; mapPreset: MapPreset }
@@ -551,7 +552,7 @@ const initialState: GameState = {
   effects: [], shakeKey: 0,
   achievements: [], playerUsedPincer: 0, playerUsedBlitzkrieg: false, playerUsedGuerrilla: false, playerUsedSiege: false, artilleryKills: 0, playerLostNoUnits: true,
   showBattleModal: null, mapPreset: 'classic',
-  buildMode: null, validBuildPlacements: [], playerBuildCount: 0,
+  buildMode: null, validBuildPlacements: [], playerBuildCount: 0, playerDeployCount: 0,
 };
 function gameReducer(state: GameState, action: Action): GameState {
   switch (action.type) {
@@ -569,19 +570,24 @@ function gameReducer(state: GameState, action: Action): GameState {
       const secondary = TACTICS.find(t => t.id === state.secondaryTacticId);
       const newLog = [...state.log];
       let newUnits = [...state.units];
+      let tacticsUsed = [...state.tacticsUsed];
+      let playerUsedPincer = state.playerUsedPincer;
+      let playerUsedBlitzkrieg = state.playerUsedBlitzkrieg;
+      let playerUsedGuerrilla = state.playerUsedGuerrilla;
+      let playerUsedSiege = state.playerUsedSiege;
       if (tactic) {
         newLog.push({ turn: state.turn, msg: `🎯 التكتيك: ${tactic.name}`, type: 'tactic' });
-        if (!state.tacticsUsed.includes(tactic.id)) { state.tacticsUsed.push(tactic.id); }
-        if (tactic.id === 'pincer') state.playerUsedPincer++;
-        if (tactic.id === 'blitzkrieg') state.playerUsedBlitzkrieg = true;
-        if (tactic.id === 'guerrilla') state.playerUsedGuerrilla = true;
-        if (tactic.id === 'siege') state.playerUsedSiege = true;
+        if (!tacticsUsed.includes(tactic.id)) { tacticsUsed.push(tactic.id); }
+        if (tactic.id === 'pincer') playerUsedPincer++;
+        if (tactic.id === 'blitzkrieg') playerUsedBlitzkrieg = true;
+        if (tactic.id === 'guerrilla') playerUsedGuerrilla = true;
+        if (tactic.id === 'siege') playerUsedSiege = true;
       }
       if (secondary) newLog.push({ turn: state.turn, msg: `🔧 تكتيك ثانوي: ${secondary.name} (50%)`, type: 'tactic' });
       if (tactic?.special === 'deception') { for (let i = 0; i < 2; i++) { for (let c = 0; c <= 2; c++) { for (let r = 0; r < ROWS; r++) { if (!getUnitAt(newUnits, c, r) && getTerrainAt(state.grid, c, r) !== 'water') { newUnits.push({ ...createUnit(Date.now() + i, 'infantry', 'player', c, r), isFake: true, fakeTurns: 2, moved: true, attacked: true }); break; } } } } newLog.push({ turn: state.turn, msg: '🎭 تم إنشاء وحدات وهمية!', type: 'tactic' }); }
       if (tactic?.special === 'attrition') newLog.push({ turn: state.turn, msg: '📉 استنزاف: -10 إمدادات للعدو', type: 'tactic' });
       if (tactic?.special === 'scorched_earth') newLog.push({ turn: state.turn, msg: '🔥 الأرض المحروقة: -20 إمدادات للعدو', type: 'tactic' });
-      return { ...state, phase: 'movement', playerTactic: state.tacticId, secondaryPlayerTactic: state.secondaryTacticId, units: newUnits, log: newLog, selectedId: null, validMoves: [], validAttacks: [], deployMode: null, tacticsUsed: state.tacticsUsed, playerUsedPincer: state.playerUsedPincer, playerUsedBlitzkrieg: state.playerUsedBlitzkrieg, playerUsedGuerrilla: state.playerUsedGuerrilla, playerUsedSiege: state.playerUsedSiege };
+      return { ...state, phase: 'movement', playerTactic: state.tacticId, secondaryPlayerTactic: state.secondaryTacticId, units: newUnits, log: newLog, selectedId: null, validMoves: [], validAttacks: [], deployMode: null, tacticsUsed, playerUsedPincer, playerUsedBlitzkrieg, playerUsedGuerrilla, playerUsedSiege };
     }
     case 'HEX_CLICK': return handleHexClick(state, action.col, action.row);
     case 'HEX_HOVER': return { ...state, hoverHex: action.col !== null && action.row !== null ? [action.col, action.row] : null };
@@ -735,11 +741,13 @@ function handleConfirmAttack(state: GameState): GameState {
   const log = [...state.log];
   log.push({ turn: state.turn, msg: `⚔️ ${UNIT_DEFS[attacker.type].nameAr} هاجم ${UNIT_DEFS[defender.type].nameAr} - ${dmg} ضرر`, type: 'attack' });
   let pKilled = state.playerUnitsKilled, aKilled = state.aiUnitsKilled;
+  let artilleryKills = state.artilleryKills;
+  let playerLostNoUnits = state.playerLostNoUnits;
   let totalDmgDealt = state.totalDamageDealt + dmg, totalDmgReceived = state.totalDamageReceived;
   let defIdx = newUnits.findIndex(u => u.id === defender.id);
   let newHp = defender.hp - dmg;
   if (aiTactic?.special === 'tactical_retreat' && defender.owner === 'ai' && newHp <= 0) { newHp = Math.floor(defender.maxHp * 0.5); log.push({ turn: state.turn, msg: '  ⚡ الانسحاب التكتيكي للعدو!', type: 'defense' }); }
-  if (newHp <= 0) { newUnits = newUnits.filter(u => u.id !== defender.id); if (defender.owner === 'ai') { pKilled++; if (attacker.type === 'artillery' || attacker.type === 'rocket_artillery') state.artilleryKills++; log.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[defender.type].nameAr} (عدو) دُمر!`, type: 'system' }); } else { aKilled++; state.playerLostNoUnits = false; } } else { newUnits[defIdx] = { ...newUnits[defIdx], hp: newHp }; }
+  if (newHp <= 0) { newUnits = newUnits.filter(u => u.id !== defender.id); if (defender.owner === 'ai') { pKilled++; if (attacker.type === 'artillery' || attacker.type === 'rocket_artillery') artilleryKills++; log.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[defender.type].nameAr} (عدو) دُمر!`, type: 'system' }); } else { aKilled++; playerLostNoUnits = false; } } else { newUnits[defIdx] = { ...newUnits[defIdx], hp: newHp }; }
   let atkIdx = newUnits.findIndex(u => u.id === attacker.id);
   if (atkIdx >= 0) {
     let au = { ...newUnits[atkIdx] };
@@ -760,7 +768,7 @@ function handleConfirmAttack(state: GameState): GameState {
     atkIdx = newUnits.findIndex(u => u.id === attacker.id);
     if (atkIdx >= 0) {
       let aHp = newUnits[atkIdx].hp - counterDmg;
-      if (aHp <= 0) { newUnits = newUnits.filter(u => u.id !== attacker.id); aKilled++; state.playerLostNoUnits = false; log.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[attacker.type].nameAr} دُمر بهجوم مضاد!`, type: 'system' }); }
+      if (aHp <= 0) { newUnits = newUnits.filter(u => u.id !== attacker.id); aKilled++; playerLostNoUnits = false; log.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[attacker.type].nameAr} دُمر بهجوم مضاد!`, type: 'system' }); }
       else { newUnits[atkIdx] = { ...newUnits[atkIdx], hp: aHp }; }
     }
   }
@@ -768,7 +776,7 @@ function handleConfirmAttack(state: GameState): GameState {
   const playerAlive = newUnits.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).length;
   const newEffects = [...state.effects, { id: `fx_${Date.now()}`, col: defender.col, row: defender.row, type: 'attack' as const, startTime: Date.now() }];
   if (newHp <= 0) newEffects.push({ id: `fx2_${Date.now()}`, col: defender.col, row: defender.row, type: 'explosion' as const, startTime: Date.now() });
-  return { ...state, units: newUnits, selectedId: null, validAttacks: [], validMoves: [], log, damagePreview: null, showBattleModal: null, playerUnitsKilled: pKilled, aiUnitsKilled: aKilled, totalDamageDealt: totalDmgDealt, totalDamageReceived: totalDmgReceived, effects: newEffects, shakeKey: attacker.type === 'artillery' || attacker.type === 'missiles' || attacker.type === 'rocket_artillery' ? state.shakeKey + 1 : state.shakeKey, winner: aiAlive === 0 ? 'player' : playerAlive === 0 ? 'ai' : null, phase: aiAlive === 0 || playerAlive === 0 ? 'ai_turn' : state.phase };
+  return { ...state, units: newUnits, selectedId: null, validAttacks: [], validMoves: [], log, damagePreview: null, showBattleModal: null, playerUnitsKilled: pKilled, aiUnitsKilled: aKilled, totalDamageDealt: totalDmgDealt, totalDamageReceived: totalDmgReceived, artilleryKills, playerLostNoUnits, effects: newEffects, shakeKey: attacker.type === 'artillery' || attacker.type === 'missiles' || attacker.type === 'rocket_artillery' ? state.shakeKey + 1 : state.shakeKey, winner: aiAlive === 0 ? 'player' : playerAlive === 0 ? 'ai' : null, phase: aiAlive === 0 || playerAlive === 0 ? 'ai_turn' : state.phase };
 }
 function handleHexClick(state: GameState, col: number, row: number): GameState {
   if (state.phase !== 'movement' && state.phase !== 'attack') return state;
@@ -780,8 +788,13 @@ function handleHexClick(state: GameState, col: number, row: number): GameState {
     return { ...state, buildMode: null, validBuildPlacements: [] };
   }
   if (state.deployMode) {
+    const playerBarracksCount = state.grid.flat().filter(c => c.building === 'barracks' && c.buildingOwner === 'player').length;
+    const maxDeploys = 1 + playerBarracksCount * 2;
+    if (state.playerDeployCount >= maxDeploys) return { ...state, deployMode: null };
     const cost = UNIT_DEFS[state.deployMode].cost;
-    if (state.player.supply < cost || col > 2 || getTerrainAt(state.grid, col, row) === 'water' || getUnitAt(state.units, col, row)) return state;
+    const playerMaxCol = state.units.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).reduce((max, u) => Math.max(max, u.col), 0);
+    const deployColLimit = Math.max(2, playerMaxCol + 1);
+    if (state.player.supply < cost || col > deployColLimit || col < 0 || getTerrainAt(state.grid, col, row) === 'water' || getTerrainAt(state.grid, col, row) === 'mountain' || getUnitAt(state.units, col, row)) return state;
     const nearBarracks = getNeighbors(col, row).some(([nc, nr]) => {
       const cell = state.grid[nc]?.[nr];
       return cell?.building === 'barracks' && cell.buildingOwner === 'player';
@@ -791,7 +804,7 @@ function handleHexClick(state: GameState, col: number, row: number): GameState {
     if (state.player.supply < finalCost) return state;
     const def = UNIT_DEFS[state.deployMode];
     const newUnit = createUnit(Date.now(), state.deployMode, 'player', col, row);
-    return { ...state, units: [...state.units, { ...newUnit, moved: true, attacked: true }], player: { ...state.player, supply: state.player.supply - finalCost }, deployMode: null, log: [...state.log, { turn: state.turn, msg: `✦ تم نشر ${def.nameAr}${nearBarracks ? ' (خصم ثكنة!)' : ''}`, type: 'tactic' }] };
+    return { ...state, units: [...state.units, { ...newUnit, moved: true, attacked: true }], player: { ...state.player, supply: state.player.supply - finalCost }, deployMode: null, playerDeployCount: state.playerDeployCount + 1, log: [...state.log, { turn: state.turn, msg: `✦ تم نشر ${def.nameAr}${nearBarracks ? ' (خصم ثكنة!)' : ''} (${state.playerDeployCount + 1}/${maxDeploys})`, type: 'tactic' }] };
   }
   const clicked = getUnitAt(state.units, col, row);
   const tactic = TACTICS.find(t => t.id === state.playerTactic);
@@ -837,9 +850,10 @@ function aiSelectTactic(state: GameState): string {
   if (fU.length >= 2 && isHard) return 'guerrilla';
   return TACTICS[Math.floor(Math.random() * TACTICS.length)].id;
 }
-function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: PlayerState; playerSupplyDelta: number } {
+function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: PlayerState; playerSupplyDelta: number; grid: HexCell[][] } {
   const log: LogEntry[] = [];
   let units = state.units.map(u => ({ ...u, moved: false, attacked: false }));
+  let newGrid = state.grid.map(col => col.map(cell => ({ ...cell })));
   const aiTactic = TACTICS.find(t => t.id === state.aiTactic);
   const playerTactic = TACTICS.find(t => t.id === state.playerTactic);
   let ai = { ...state.ai };
@@ -997,14 +1011,16 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
   }
   // Deploy
   const deployable: UnitType[] = ['infantry', 'armor', 'artillery', 'cavalry', 'medics', 'engineers'];
-  for (let d = 0; d < 2; d++) {
+  const aiBarracksCount = state.grid.flat().filter(c => c.building === 'barracks' && c.buildingOwner === 'ai').length;
+  const maxDeploys = 2 + aiBarracksCount * 2;
+  for (let d = 0; d < maxDeploys; d++) {
     if (ai.supply < 10) break;
     const infCount = aiUnits.filter(u => u.type === 'infantry').length;
     const artCount = aiUnits.filter(u => u.type === 'artillery').length;
     let type: UnitType = infCount < artCount ? 'infantry' : deployable[Math.floor(Math.random() * deployable.length)];
     const cost = UNIT_DEFS[type].cost;
     if (ai.supply < cost) continue;
-    for (let c = 13; c >= 11; c--) { for (let r = 0; r < ROWS; r++) { if (!getUnitAt(units, c, r) && getTerrainAt(state.grid, c, r) !== 'water') { units.push({ ...createUnit(Date.now() + d, type, 'ai', c, r), moved: true, attacked: true }); ai = { ...ai, supply: ai.supply - cost }; log.push({ turn: state.turn, msg: `▸ العدو نشر ${UNIT_DEFS[type].nameAr}`, type: 'tactic' }); break; } } if (ai.supply < cost) break; }
+    for (let c = 13; c >= 11; c--) { for (let r = 0; r < ROWS; r++) { if (!getUnitAt(units, c, r) && getTerrainAt(state.grid, c, r) !== 'water') { const nearBarracks = getNeighbors(c, r).some(([nc, nr]) => { const cell = state.grid[nc]?.[nr]; return cell?.building === 'barracks' && cell.buildingOwner === 'ai'; }); const discount = nearBarracks ? 0.75 : 1; const finalCost = Math.floor(cost * discount); if (ai.supply < finalCost) continue; units.push({ ...createUnit(Date.now() + d, type, 'ai', c, r), moved: true, attacked: true }); ai = { ...ai, supply: ai.supply - finalCost }; log.push({ turn: state.turn, msg: `▸ العدو نشر ${UNIT_DEFS[type].nameAr}${nearBarracks ? ' (خصم ثكنة!)' : ''}`, type: 'tactic' }); break; } } if (ai.supply < cost) break; }
   }
   // AI builds structures
   const aiEngineers = units.filter(u => u.owner === 'ai' && u.type === 'engineers' && u.hp > 0);
@@ -1013,13 +1029,13 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
       if (ai.supply < 15) break;
       const neighbors = getNeighbors(engineer.col, engineer.row);
       const buildable = neighbors.filter(([nc, nr]) => {
-        const cell = state.grid[nc]?.[nr];
+        const cell = newGrid[nc]?.[nr];
         return cell && !cell.building && !getUnitAt(units, nc, nr) && cell.terrain !== 'water' && cell.terrain !== 'mountain' && nc >= 6;
       });
       if (buildable.length === 0) continue;
       let bType: BuildingType;
-      const aiFactoryCount = state.grid.flat().filter(c => c.building === 'barracks' && c.buildingOwner === 'ai').length;
-      const aiDefenseCount = state.grid.flat().filter(c => c.building === 'defense_tower' && c.buildingOwner === 'ai').length;
+      const aiFactoryCount = newGrid.flat().filter(c => c.building === 'barracks' && c.buildingOwner === 'ai').length;
+      const aiDefenseCount = newGrid.flat().filter(c => c.building === 'defense_tower' && c.buildingOwner === 'ai').length;
       if (aiDefenseCount < 1 && ai.supply >= BUILDING_COSTS.defense_tower) {
         bType = 'defense_tower';
       } else if (aiFactoryCount < 1 && ai.supply >= BUILDING_COSTS.barracks) {
@@ -1031,19 +1047,18 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
       const cost = BUILDING_COSTS[bType];
       if (ai.supply < cost) continue;
       const [bc, br] = buildable[Math.floor(Math.random() * buildable.length)];
-      state.grid[bc][br].building = bType;
-      state.grid[bc][br].buildingOwner = 'ai';
+      newGrid[bc][br] = { ...newGrid[bc][br], building: bType, buildingOwner: 'ai' as Owner };
       ai = { ...ai, supply: ai.supply - cost };
       log.push({ turn: state.turn, msg: `▸ العدو بنى ${BUILDING_DEFS[bType].nameAr}`, type: 'system' });
       break;
     }
   }
-  return { units, log, ai, playerSupplyDelta };
+  return { units, log, ai, playerSupplyDelta, grid: newGrid };
 }
 function handleAIComplete(state: GameState): GameState {
-  const { units: newUnits, log: aiLog, ai: newAi, playerSupplyDelta } = aiExecuteTurn(state);
-  // Process defense tower attacks
-  const towerResult = processDefenseTowerAttacks(state, newUnits, aiLog);
+  const { units: newUnits, log: aiLog, ai: newAi, playerSupplyDelta, grid: aiNewGrid } = aiExecuteTurn(state);
+  // Process defense tower attacks (use AI-modified grid)
+  const towerResult = processDefenseTowerAttacks({ ...state, grid: aiNewGrid }, newUnits, aiLog);
   const towerUnits = towerResult.units;
   const towerLog = towerResult.log;
   const towerEffects = towerResult.effects;
@@ -1052,7 +1067,10 @@ function handleAIComplete(state: GameState): GameState {
   const playerAlive = finalUnits.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).length;
   if (aiAlive === 0 || playerAlive === 0) {
     const w: GameState = { ...state, units: finalUnits, ai: newAi, animating: false, log: [...state.log, ...towerLog], winner: aiAlive === 0 ? 'player' : 'ai', screen: 'game_over', playerUnitsKilled: state.playerUnitsKilled, aiUnitsKilled: state.aiUnitsKilled, playerUsedPincer: state.playerUsedPincer, playerUsedBlitzkrieg: state.playerUsedBlitzkrieg, playerUsedGuerrilla: state.playerUsedGuerrilla, playerUsedSiege: state.playerUsedSiege, artilleryKills: state.artilleryKills, playerLostNoUnits: state.playerLostNoUnits, tacticsUsed: state.tacticsUsed, totalDamageDealt: state.totalDamageDealt, totalDamageReceived: state.totalDamageReceived };
-    if (w.winner === 'player') checkAchievements(w);
+    if (w.winner === 'player') {
+      const achs = checkAchievements(w);
+      return { ...w, achievements: achs };
+    }
     return w;
   }
   const newTurn = state.turn + 1;
@@ -1069,10 +1087,10 @@ function handleAIComplete(state: GameState): GameState {
   if (wTurnsLeft <= 0) { weather = getWeather(); wTurnsLeft = 3; }
   const healed = leveled.map(u => {
     if (u.hp <= 0 || u.isFake) return u;
-    const cell = state.grid[u.col]?.[u.row];
+    const cell = aiNewGrid[u.col]?.[u.row];
     if (cell?.building === 'hospital' && cell.buildingOwner === u.owner) return { ...u, hp: Math.min(u.maxHp, u.hp + 15) };
     for (const [nc, nr] of getNeighbors(u.col, u.row)) {
-      const n = state.grid[nc]?.[nr];
+      const n = aiNewGrid[nc]?.[nr];
       if (n?.building === 'hospital' && n.buildingOwner === u.owner) return { ...u, hp: Math.min(u.maxHp, u.hp + 15) };
     }
     return u;
@@ -1085,13 +1103,13 @@ function handleAIComplete(state: GameState): GameState {
     return nu;
   });
   const buildingUnits = updated.map(u => {
-    const cell = state.grid[u.col]?.[u.row];
+    const cell = aiNewGrid[u.col]?.[u.row];
     if (cell?.building && cell.buildingOwner !== u.owner) return { ...u };
     return u;
   });
   let pFactoryBonus = 0, aFactoryBonus = 0;
   for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
-    const cell = state.grid[c][r];
+    const cell = aiNewGrid[c][r];
     if (cell.building === 'factory') {
       const unit = getUnitAt(buildingUnits, c, r);
       if (unit?.owner === 'player') pFactoryBonus += 5;
@@ -1102,7 +1120,7 @@ function handleAIComplete(state: GameState): GameState {
       if (cell.buildingOwner === 'ai') aFactoryBonus += 12;
     }
   }
-  const newGrid = state.grid.map(col => col.map(cell => {
+  const newGrid = aiNewGrid.map(col => col.map(cell => {
     const u = getUnitAt(buildingUnits, cell.col, cell.row);
     if (u && cell.building) return { ...cell, buildingOwner: u.owner };
     return cell;
@@ -1133,13 +1151,13 @@ function handleAIComplete(state: GameState): GameState {
     ...state, units: stormDmg, grid: newGrid, revealed, effects: [...state.effects, ...towerEffects.filter(e => Date.now() - e.startTime < 1000)], ai: { ...newAi, supply: Math.max(0, newAi.supply + aiSupplyGain - aiSupplyRed), training: newAi.training >= 20 ? newAi.training - 20 + 5 : newAi.training + 5, morale: aMorale },
     phase: 'planning', turn: newTurn, animating: false,
     playerTactic: null, secondaryPlayerTactic: null, aiTactic: aiNewTactic, tacticId: null, secondaryTacticId: null,
-    selectedId: null, validMoves: [], validAttacks: [], deployMode: null, buildMode: null, validBuildPlacements: [], playerBuildCount: 0, log: nextLog,
+    selectedId: null, validMoves: [], validAttacks: [], deployMode: null, buildMode: null, validBuildPlacements: [], playerBuildCount: 0, playerDeployCount: 0, log: nextLog,
     player: { supply: Math.max(0, state.player.supply + supplyGain + playerSupplyDelta), morale: pMorale, training: state.player.training >= 20 ? state.player.training - 20 + 5 : state.player.training + 5 },
     weather, weatherTurnsLeft: wTurnsLeft,
     previousState: null,
   };
 }
-function checkAchievements(state: GameState) {
+function checkAchievements(state: GameState): string[] {
   const a = [...state.achievements];
   const add = (id: string) => { if (!a.includes(id)) a.push(id); };
   if (state.playerUsedPincer >= 3) add('victor_cannae');
@@ -1150,7 +1168,7 @@ function checkAchievements(state: GameState) {
   if (state.artilleryKills >= 5) add('artillery_master');
   if (state.playerUsedSiege) add('siege_master');
   try { if (typeof window !== 'undefined') localStorage.setItem('warGame_achievements', JSON.stringify(a)); } catch {}
-  state.achievements = a;
+  return a;
 }
 // ==================== COMPONENTS ====================
 function MainMenu({ onStart, onHelp, onLoad }: { onStart: (d: Difficulty) => void; onHelp: () => void; onLoad: () => void }) {
@@ -1375,7 +1393,8 @@ function HexGridComp({ state, dispatch }: { state: GameState; dispatch: React.Di
           const isValidMove = validMoveSet.has(`${ci},${ri}`);
           const isValidAttack = validAttackSet.has(`${ci},${ri}`);
           const isHovered = state.hoverHex?.[0] === ci && state.hoverHex?.[1] === ri;
-          const isDeploy = state.deployMode && ci <= 2 && !unit && cell.terrain !== 'water';
+          const deployColLimit = state.deployMode ? Math.max(2, state.units.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).reduce((max, u) => Math.max(max, u.col), 0) + 1) : 2;
+          const isDeploy = state.deployMode && ci <= deployColLimit && !unit && cell.terrain !== 'water' && cell.terrain !== 'mountain';
           const isValidBuild = validBuildSet.has(`${ci},${ri}`);
           const isBuildHover = state.buildMode && state.hoverHex?.[0] === ci && state.hoverHex?.[1] === ri && isValidBuild;
           const showEnemy = unit && unit.owner === 'ai' && !unit.isFake && isRevealed;
@@ -1518,7 +1537,7 @@ function TacticSelector({ state, dispatch }: { state: GameState; dispatch: React
             </button>;
           })}
         </div>
-        {state.deployMode && <p className="text-green-400 text-xs mt-1 text-center">🎯 انقر في منطقتك (الأعمدة 0-2)</p>}
+        {state.deployMode && (() => { const bc = state.grid.flat().filter(c => c.building === 'barracks' && c.buildingOwner === 'player').length; const md = 1 + bc * 2; const remaining = md - state.playerDeployCount; return remaining > 0 ? <p className="text-green-400 text-xs mt-1 text-center">🎯 انقر في منطقتك | متبقي: {remaining}/{md}</p> : <p className="text-red-400 text-xs mt-1 text-center">⚠️ تم نشر الحد الأقصى ({md})</p>; })()}
       </div>
       <div className="border-t border-gray-700 pt-2 mt-2">
         <div className="text-white font-bold text-xs mb-1">🏗️ بناء المباني (المهندسين فقط)</div>
