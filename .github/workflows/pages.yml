@@ -25,8 +25,8 @@ jobs:
         with:
           node-version: "20"
       - run: npm install -g bun
-      - run: bun install
-      - run: bun run build
+      - run: bun install --no-save
+      - run: npx next build
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ./out
