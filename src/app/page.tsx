@@ -1694,12 +1694,18 @@ function UnitCardPanel({ state, dispatch }: { state: GameState; dispatch: React.
 }
 function GameLog({ state }: { state: GameState }) {
   const logRef = useRef<HTMLDivElement>(null);
+  const [logExpanded, setLogExpanded] = useState(false);
+  const isMobileLog = typeof window !== 'undefined' && window.innerWidth < 768;
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [state.log.length]);
+  const visibleLogs = isMobileLog && !logExpanded ? state.log.slice(-2) : state.log.slice(-30);
   return (
-    <div className="rounded-lg p-2" style={{ background: '#16213e', maxHeight: '20vh' }}>
-      <div className="text-white text-xs font-bold mb-1">📜 سجل الأحداث</div>
-      <div ref={logRef} className="space-y-0.5 overflow-y-auto max-h-48 text-xs" style={{ scrollbarWidth: '4px' as any, scrollbarColor: '#0f3460' }}>
-        {state.log.slice(-30).reverse().map((entry, i) => (<div key={i} className="text-gray-300 leading-tight" style={{ opacity: 1 - i * 0.02 }}>{entry.msg}</div>))}
+    <div className="rounded-lg p-2" style={{ background: '#16213e' }}>
+      <div className="text-white text-xs font-bold mb-1 cursor-pointer flex items-center justify-between" onClick={() => isMobileLog && setLogExpanded(!logExpanded)}>
+        <span>📋 سجل المعركة ({state.log.length})</span>
+        {isMobileLog && <span className="text-gray-400">{logExpanded ? '▲' : '▼'}</span>}
+      </div>
+      <div ref={logRef} className="space-y-0.5 overflow-y-auto text-xs transition-all duration-200" style={{ scrollbarWidth: '4px' as any, scrollbarColor: '#0f3460', maxHeight: isMobileLog ? (logExpanded ? '200px' : '80px') : '20vh' }}>
+        {visibleLogs.reverse().map((entry, i) => (<div key={i} className="text-gray-300 leading-tight" style={{ opacity: 1 - i * 0.02 }}>{entry.msg}</div>))}
       </div>
     </div>
   );
@@ -1863,16 +1869,146 @@ function TransportDeployPanel({ state, dispatch }: { state: GameState; dispatch:
   );
 }
 
+// ==================== MOBILE ACTION BAR ====================
+function MobileActionBar({ state, dispatch }: { state: GameState; dispatch: React.Dispatch<Action> }) {
+  return (
+    <div className="flex items-center gap-2 mt-2 p-2 rounded-xl" style={{ background: '#16213e', border: '1px solid #0f3460' }}>
+      {state.phase === 'movement' && (
+        <button onClick={() => dispatch({ type: 'END_MOVEMENT' })} className="flex-1 py-2.5 rounded-lg text-white font-bold text-sm cursor-pointer" style={{ background: 'linear-gradient(135deg, #3498db, #2980b9)' }}>
+          ✅ إنهاء الحركة
+        </button>
+      )}
+      {state.phase === 'attack' && (
+        <button onClick={() => dispatch({ type: 'END_ATTACK' })} className="flex-1 py-2.5 rounded-lg text-white font-bold text-sm cursor-pointer" style={{ background: 'linear-gradient(135deg, #e94560, #c0392b)' }}>
+          ⚔️ إنهاء الهجوم
+        </button>
+      )}
+      {state.phase === 'planning' && (
+        <div className="flex-1 text-center text-yellow-400 text-sm font-bold">📋 مرحلة التخطيط</div>
+      )}
+      {state.phase === 'ai_turn' && (
+        <div className="flex-1 text-center text-red-400 text-sm font-bold">🤖 دور العدو...</div>
+      )}
+      <button onClick={() => dispatch({ type: 'UNDO' })} className="py-2.5 px-3 rounded-lg text-white text-sm cursor-pointer" style={{ background: '#333' }}>
+        ↩️
+      </button>
+      <button onClick={() => dispatch({ type: 'TOGGLE_MINIMAP' })} className="py-2.5 px-3 rounded-lg text-white text-sm cursor-pointer" style={{ background: '#333' }}>
+        🗺️
+      </button>
+      <div className="text-xs text-gray-400 text-center">
+        <div>📅 {state.turn}</div>
+        <div>📦 {state.player.supply}</div>
+      </div>
+    </div>
+  );
+}
 // ==================== HEX GRID COMPONENT ====================
 function HexGridComp({ state, dispatch, multiSelectedIds }: { state: GameState; dispatch: React.Dispatch<Action>; multiSelectedIds?: string[] }) {
   const gCols = state.gameCols || COLS; const gRows = state.gameRows || ROWS;
   const [containerWidth, setContainerWidth] = useState(0);
-  useEffect(() => { const update = () => setContainerWidth(window.innerWidth); update(); window.addEventListener('resize', update); return () => window.removeEventListener('resize', update); }, []);
-  const baseScale = gCols <= 11 ? 1.15 : gCols >= 16 ? 0.8 : 1;
-  const screenScale = containerWidth < 768 ? Math.max(0.5, containerWidth / 900) : 1;
-  const scale = baseScale * screenScale;
-  const svgW = (gCols * HEX_SIZE * 1.5 + HEX_SIZE + 20) * scale;
-  const svgH = (gRows * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20) * scale;
+  const [containerHeight, setContainerHeight] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const lastTouchDist = useRef(0);
+  const touchStartPos = useRef<{ x: number; y: number; time: number } | null>(null);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [longPressInfo, setLongPressInfo] = useState<{ col: number; row: number } | null>(null);
+  useEffect(() => { const update = () => { setContainerWidth(window.innerWidth); setContainerHeight(window.innerHeight); }; update(); window.addEventListener('resize', update); return () => window.removeEventListener('resize', update); }, []);
+  // Dynamic hex size - fits map to container without blurry CSS scaling
+  const isMobileView = containerWidth < 768;
+  const mapAreaHeight = isMobileView ? containerHeight * 0.65 : containerHeight * 0.7;
+  const idealHexW = (containerWidth - 20) / (gCols * 1.5 + 1);
+  const idealHexH = (mapAreaHeight - 20) / (gRows * SQRT3 + SQRT3 / 2);
+  const dynamicSize = Math.max(18, Math.min(32, Math.floor(Math.min(idealHexW, idealHexH))));
+  // Local render functions using dynamicSize for crisp SVG rendering
+  const renderHexCenter = (col: number, row: number): [number, number] => {
+    const x = col * dynamicSize * 1.5 + dynamicSize + 10;
+    const y = row * SQRT3 * dynamicSize + (col % 2 === 1 ? SQRT3 * dynamicSize / 2 : 0) + dynamicSize * SQRT3 / 2 + 10;
+    return [x, y];
+  };
+  const svgViewW = gCols * dynamicSize * 1.5 + dynamicSize + 20;
+  const svgViewH = gRows * SQRT3 * dynamicSize + SQRT3 * dynamicSize / 2 + 20;
+  // Touch event helper: convert pixel coords to hex coordinates
+  const getHexFromPoint = (px: number, py: number): [number, number] | null => {
+    const approxCol = Math.round((px - dynamicSize - 10) / (dynamicSize * 1.5));
+    for (let dc = -1; dc <= 1; dc++) {
+      const ci = approxCol + dc;
+      if (ci < 0 || ci >= gCols) continue;
+      for (let ri = 0; ri < gRows; ri++) {
+        const [cx, cy] = renderHexCenter(ci, ri);
+        const dist = Math.sqrt((px - cx) ** 2 + (py - cy) ** 2);
+        if (dist < dynamicSize * 0.9) return [ci, ri];
+      }
+    }
+    return null;
+  };
+  const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      lastTouchDist.current = Math.sqrt(dx * dx + dy * dy);
+      if (longPressTimer.current) clearTimeout(longPressTimer.current);
+      return;
+    }
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    touchStartPos.current = { x: touch.clientX, y: touch.clientY, time: Date.now() };
+    const svgEl = e.currentTarget.querySelector('svg');
+    if (!svgEl) return;
+    const svgRect = svgEl.getBoundingClientRect();
+    const x = (touch.clientX - svgRect.left) * (svgViewW / svgRect.width);
+    const y = (touch.clientY - svgRect.top) * (svgViewH / svgRect.height);
+    const hex = getHexFromPoint(x, y);
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+    longPressTimer.current = setTimeout(() => {
+      if (hex) {
+        setLongPressInfo({ col: hex[0], row: hex[1] });
+        if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(30);
+      }
+    }, 500);
+  };
+  const handleTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length === 0 && touchStartPos.current) {
+      const endTouch = e.changedTouches[0];
+      const dx = Math.abs(endTouch.clientX - touchStartPos.current.x);
+      const dy = Math.abs(endTouch.clientY - touchStartPos.current.y);
+      const dt = Date.now() - touchStartPos.current.time;
+      if (dx < 15 && dy < 15 && dt < 500) {
+        const svgEl = e.currentTarget.querySelector('svg');
+        if (svgEl) {
+          const svgRect = svgEl.getBoundingClientRect();
+          const x = (endTouch.clientX - svgRect.left) * (svgViewW / svgRect.width);
+          const y = (endTouch.clientY - svgRect.top) * (svgViewH / svgRect.height);
+          const hex = getHexFromPoint(x, y);
+          if (hex) dispatch({ type: 'HEX_CLICK', col: hex[0], row: hex[1] });
+        }
+      }
+      touchStartPos.current = null;
+    }
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+  };
+  const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length === 2) {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (lastTouchDist.current > 0) {
+        const scale = dist / lastTouchDist.current;
+        setZoomLevel(prev => Math.max(0.5, Math.min(3, prev * scale)));
+      }
+      lastTouchDist.current = dist;
+      if (longPressTimer.current) clearTimeout(longPressTimer.current);
+      return;
+    }
+    if (touchStartPos.current && e.touches.length === 1) {
+      const dx = Math.abs(e.touches[0].clientX - touchStartPos.current.x);
+      const dy = Math.abs(e.touches[0].clientY - touchStartPos.current.y);
+      if (dx > 15 || dy > 15) {
+        if (longPressTimer.current) clearTimeout(longPressTimer.current);
+      }
+    }
+  };
   const tactic = TACTICS.find(t => t.id === state.playerTactic) ?? null;
   const secondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic) ?? null;
   const validMoveSet = new Set(state.validMoves.map(([c, r]) => `${c},${r}`));
@@ -1885,16 +2021,26 @@ function HexGridComp({ state, dispatch, multiSelectedIds }: { state: GameState; 
     if (target) { const dmg = calcDamage(selected, target, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false, state.units); const cDmg = calcCounterDamage(selected, target, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, state.units); dmgPreview = { col: state.hoverHex[0], row: state.hoverHex[1], dmg, counterDmg: cDmg }; }
   }
   const statusEffectIcons = (u: Unit) => u.statusEffects.length > 0 ? u.statusEffects.map(e => STATUS_EFFECT_DEFS[e.type].icon).join('') : '';
+  // Dynamic font sizes based on hex size
+  const terrainFontSize = dynamicSize * 0.45;
+  const unitIconFontSize = dynamicSize * 0.45;
+  const fogFontSize = dynamicSize * 0.5;
+  const hpBarW = dynamicSize * 0.85;
+  const hpBarH = 3;
+  const hpBarYOff = dynamicSize * 0.55;
+  const circleR = dynamicSize * 0.32;
   return (
-    <div className={`relative rounded-xl overflow-auto ${state.shakeKey % 2 === 1 ? 'animate-shake' : ''}`} style={{ background: '#0d1117', border: '2px solid #1e3a5f', maxHeight: '70vh', touchAction: 'none' }}>
-      <svg width={svgW} height={svgH} viewBox={`0 0 ${(gCols * HEX_SIZE * 1.5 + HEX_SIZE + 20)} ${(gRows * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20)}`} className="block" style={{ minWidth: svgW }}>
-        <g transform={`scale(${scale})`}>
+    <>
+    <div ref={containerRef} className={`relative rounded-xl overflow-auto ${state.shakeKey % 2 === 1 ? 'animate-shake' : ''}`}
+      style={{ background: '#0d1117', border: '2px solid #1e3a5f', maxHeight: isMobileView ? 'calc(100vh - 180px)' : '70vh', touchAction: 'pan-x pan-y', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' as const }}
+      onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}>
+      <svg ref={svgRef} width="100%" viewBox={`0 0 ${svgViewW} ${svgViewH}`} className="block" style={{ transform: `scale(${zoomLevel})`, transformOrigin: 'top center' }}>
         <defs>
           <filter id="glow"><feGaussianBlur stdDeviation="3" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
           <filter id="selGlow"><feGaussianBlur stdDeviation="4" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
         </defs>
         {state.grid.map((col, ci) => col.map((cell, ri) => {
-          const [cx, cy] = hexCenter(ci, ri);
+          const [cx, cy] = renderHexCenter(ci, ri);
           const terrain = TERRAIN_DEFS[cell.terrain];
           const unit = getUnitAt(state.units, ci, ri);
           const isRevealed = state.revealed[ci]?.[ri] ?? false;
@@ -1917,41 +2063,91 @@ function HexGridComp({ state, dispatch, multiSelectedIds }: { state: GameState; 
           const bldg = cell.building ? BUILDING_DEFS[cell.building] : null;
           return (
             <g key={`${ci}-${ri}`}>
-              <path d={hexPathStr(cx, cy, HEX_SIZE - 1)} fill={fill} stroke={isSelected ? '#ffd700' : isValidBuild ? '#2ecc71' : isHovered && !isFog ? '#fff' : '#2c3e50'} strokeWidth={isSelected ? 3 : isValidBuild ? 2 : isHovered ? 1.5 : 0.5} style={{ cursor: isFog ? 'default' : 'pointer' }} filter={isSelected ? 'url(#selGlow)' : isValidMove || isValidAttack ? 'url(#glow)' : undefined} onClick={() => !isFog && dispatch({ type: 'HEX_CLICK', col: ci, row: ri })} onMouseEnter={() => dispatch({ type: 'HEX_HOVER', col: ci, row: ri })} onMouseLeave={() => dispatch({ type: 'HEX_HOVER', col: -1, row: null })} opacity={isValidMove ? 0.6 : isValidAttack ? 0.6 : 1} />
-              {isFog && <text x={cx} y={cy + 4} textAnchor="middle" fontSize="10" fill="#333" style={{ pointerEvents: 'none' }}>?</text>}
-              {!isFog && <text x={cx} y={cy + HEX_SIZE * 0.35} textAnchor="middle" fontSize="10" style={{ pointerEvents: 'none' }}>{terrain.icon}</text>}
-              {!isFog && bldg && <text x={cx - 8} y={cy - HEX_SIZE * 0.25} textAnchor="middle" fontSize="10" style={{ pointerEvents: 'none' }}>{bldg.icon}</text>}
-              {!isFog && bldg && cell.buildingLevel > 1 && <text x={cx + 10} y={cy - HEX_SIZE * 0.35} textAnchor="middle" fontSize="6" fill="#ffd700" style={{ pointerEvents: 'none' }}>{'⭐'.repeat(cell.buildingLevel - 1)}</text>}
-              {!isFog && bldg && cell.buildingOwner && <circle cx={cx + 8} cy={cy - HEX_SIZE * 0.3} r={3} fill={cell.buildingOwner === 'player' ? '#27ae60' : '#c0392b'} style={{ pointerEvents: 'none' }} />}
-              {cell.strategicPoint && !isFog && (() => { const spDef = STRATEGIC_POINT_DEFS[cell.strategicPoint]; const ownerColor = cell.strategicOwner === 'player' ? '#27ae60' : cell.strategicOwner === 'ai' ? '#c0392b' : '#95a5a6'; return (<g><circle cx={cx} cy={cy + HEX_SIZE * 0.45} r={5} fill={spDef.color} opacity={0.9} stroke={ownerColor} strokeWidth={2} style={{ pointerEvents: 'none' }}><animate attributeName="r" values="4;6;4" dur="2s" repeatCount="indefinite" /></circle><text x={cx} y={cy + HEX_SIZE * 0.5} textAnchor="middle" fontSize="6" style={{ pointerEvents: 'none' }}>{spDef.icon}</text></g>); })()}
+              <path d={hexPathStr(cx, cy, dynamicSize - 1)} fill={fill} stroke={isSelected ? '#ffd700' : isValidBuild ? '#2ecc71' : isHovered && !isFog ? '#fff' : '#2c3e50'} strokeWidth={isSelected ? 3 : isValidBuild ? 2 : isHovered ? 1.5 : 0.5} style={{ cursor: isFog ? 'default' : 'pointer' }} filter={isSelected ? 'url(#selGlow)' : isValidMove || isValidAttack ? 'url(#glow)' : undefined} onClick={() => !isFog && dispatch({ type: 'HEX_CLICK', col: ci, row: ri })} onMouseEnter={() => dispatch({ type: 'HEX_HOVER', col: ci, row: ri })} onMouseLeave={() => dispatch({ type: 'HEX_HOVER', col: -1, row: null })} opacity={isValidMove ? 0.6 : isValidAttack ? 0.6 : 1} />
+              {isFog && <text x={cx} y={cy + 4} textAnchor="middle" fontSize={fogFontSize} fill="#333" style={{ pointerEvents: 'none' }}>?</text>}
+              {!isFog && <text x={cx} y={cy + dynamicSize * 0.35} textAnchor="middle" fontSize={terrainFontSize} style={{ pointerEvents: 'none' }}>{terrain.icon}</text>}
+              {!isFog && bldg && <text x={cx - 8} y={cy - dynamicSize * 0.25} textAnchor="middle" fontSize={terrainFontSize} style={{ pointerEvents: 'none' }}>{bldg.icon}</text>}
+              {!isFog && bldg && cell.buildingLevel > 1 && <text x={cx + 10} y={cy - dynamicSize * 0.35} textAnchor="middle" fontSize="8" fill="#ffd700" style={{ pointerEvents: 'none' }}>{'⭐'.repeat(cell.buildingLevel - 1)}</text>}
+              {!isFog && bldg && cell.buildingOwner && <circle cx={cx + 8} cy={cy - dynamicSize * 0.3} r={3} fill={cell.buildingOwner === 'player' ? '#27ae60' : '#c0392b'} style={{ pointerEvents: 'none' }} />}
+              {cell.strategicPoint && !isFog && (() => { const spDef = STRATEGIC_POINT_DEFS[cell.strategicPoint]; const ownerColor = cell.strategicOwner === 'player' ? '#27ae60' : cell.strategicOwner === 'ai' ? '#c0392b' : '#95a5a6'; return (<g><circle cx={cx} cy={cy + dynamicSize * 0.45} r={5} fill={spDef.color} opacity={0.9} stroke={ownerColor} strokeWidth={2} style={{ pointerEvents: 'none' }}><animate attributeName="r" values="4;6;4" dur="2s" repeatCount="indefinite" /></circle><text x={cx} y={cy + dynamicSize * 0.5} textAnchor="middle" fontSize="6" style={{ pointerEvents: 'none' }}>{spDef.icon}</text></g>); })()}
               {unit && (unit.owner === 'player' || showEnemy) && (
                 <g filter={unit.owner === 'player' ? 'url(#glow)' : undefined}>
-                  <circle cx={cx} cy={cy} r={HEX_SIZE * 0.32} fill={unit.owner === 'player' ? '#27ae60' : '#c0392b'} stroke={unit.isFake ? '#9b59b6' : unit.entrenched ? '#ffd700' : '#fff'} strokeWidth={unit.entrenched ? 2 : 1} opacity={unit.isFake ? 0.6 : 1} />
-                  <text x={cx} y={cy + 4} textAnchor="middle" fontSize="10" style={{ pointerEvents: 'none' }}>{UNIT_DEFS[unit.type].icon}</text>
-                  <rect x={cx - 10} y={cy - HEX_SIZE * 0.5} width={20} height={2.5} fill="#333" rx={1} /><rect x={cx - 10} y={cy - HEX_SIZE * 0.5} width={20 * (unit.hp / unit.maxHp)} height={2.5} fill={unit.hp / unit.maxHp > 0.5 ? '#2ecc71' : unit.hp / unit.maxHp > 0.25 ? '#f39c12' : '#e74c3c'} rx={1} />
-                  {unit.level > 1 && !unit.isFake && <text x={cx + 8} y={cy - 7} textAnchor="middle" fontSize="6" fill="#ffd700" style={{ pointerEvents: 'none' }}>⭐{unit.level}</text>}
-                  {unit.statusEffects.length > 0 && !unit.isFake && <text x={cx - 9} y={cy - 7} textAnchor="middle" fontSize="5" style={{ pointerEvents: 'none' }}>{statusEffectIcons(unit)}</text>}
+                  <circle cx={cx} cy={cy} r={circleR} fill={unit.owner === 'player' ? '#27ae60' : '#c0392b'} stroke={unit.isFake ? '#9b59b6' : unit.entrenched ? '#ffd700' : '#fff'} strokeWidth={unit.entrenched ? 2 : 1} opacity={unit.isFake ? 0.6 : 1} />
+                  <text x={cx} y={cy + 4} textAnchor="middle" fontSize={unitIconFontSize} style={{ pointerEvents: 'none' }}>{UNIT_DEFS[unit.type].icon}</text>
+                  <rect x={cx - hpBarW / 2} y={cy - hpBarYOff} width={hpBarW} height={hpBarH} fill="#333" rx={1} /><rect x={cx - hpBarW / 2} y={cy - hpBarYOff} width={hpBarW * (unit.hp / unit.maxHp)} height={hpBarH} fill={unit.hp / unit.maxHp > 0.5 ? '#2ecc71' : unit.hp / unit.maxHp > 0.25 ? '#f39c12' : '#e74c3c'} rx={1} />
+                  {unit.level > 1 && !unit.isFake && <text x={cx + 8} y={cy - 7} textAnchor="middle" fontSize="8" fill="#ffd700" style={{ pointerEvents: 'none' }}>⭐{unit.level}</text>}
+                  {unit.statusEffects.length > 0 && !unit.isFake && <text x={cx - 9} y={cy - 7} textAnchor="middle" fontSize="7" style={{ pointerEvents: 'none' }}>{statusEffectIcons(unit)}</text>}
                   {(unit.moved && unit.attacked) && unit.owner === 'player' && <text x={cx} y={cy + 11} textAnchor="middle" fontSize="5" fill="#aaa" style={{ pointerEvents: 'none' }}>✓</text>}
                 </g>
               )}
-              {dmgPreview && dmgPreview.col === ci && dmgPreview.row === ri && (<g><rect x={cx - 18} y={cy - HEX_SIZE - 8} width={36} height={22} fill="#e74c3c" rx={4} /><text x={cx} y={cy - HEX_SIZE + 4} textAnchor="middle" fontSize="8" fill="white" fontWeight="bold">-{dmgPreview.dmg}</text>{dmgPreview.counterDmg > 0 && <text x={cx} y={cy - HEX_SIZE + 12} textAnchor="middle" fontSize="6" fill="#ffa">↩-{dmgPreview.counterDmg}</text>}</g>)}
+              {dmgPreview && dmgPreview.col === ci && dmgPreview.row === ri && (<g><rect x={cx - 18} y={cy - dynamicSize - 8} width={36} height={22} fill="#e74c3c" rx={4} /><text x={cx} y={cy - dynamicSize + 4} textAnchor="middle" fontSize="10" fill="white" fontWeight="bold">-{dmgPreview.dmg}</text>{dmgPreview.counterDmg > 0 && <text x={cx} y={cy - dynamicSize + 12} textAnchor="middle" fontSize="8" fill="#ffa">↩-{dmgPreview.counterDmg}</text>}</g>)}
             </g>
           );
         }))}
-        {state.effects.map(fx => { const [cx, cy] = hexCenter(fx.col, fx.row); const age = (Date.now() - fx.startTime) / 1000; if (age > 1.5) return null; const opacity = 1 - age / 1.5; if (fx.type === 'flash') { return <rect key={fx.id} x={cx - 15} y={cy - 15} width={30} height={30} fill="white" opacity={Math.max(0, opacity * 0.8)} style={{ pointerEvents: 'none' }} />; } if (fx.type === 'particle') { const r = 5 + age * 15; const particles = [0, 1, 2, 3, 4, 5].map(i => { const angle = (i / 6) * Math.PI * 2 + age * 3; const px = cx + Math.cos(angle) * r; const py = cy + Math.sin(angle) * r; return <circle key={i} cx={px} cy={py} r={2 * opacity} fill={fx.intensity && fx.intensity > 1 ? '#ff6b35' : '#e74c3c'} opacity={opacity} />; }); return <g key={fx.id}>{particles}</g>; } const r = fx.type === 'explosion' || fx.type === 'death' ? 15 + age * 25 : 10 + age * 12; return <circle key={fx.id} cx={cx} cy={cy} r={r} fill="none" stroke={fx.type === 'heal' ? '#2ecc71' : fx.type === 'death' ? '#ff6b35' : '#e74c3c'} strokeWidth={(3 + (fx.intensity || 1)) * opacity} opacity={opacity} style={{ pointerEvents: 'none' }} />; })}
-        </g>
+        {state.effects.map(fx => { const [cx, cy] = renderHexCenter(fx.col, fx.row); const age = (Date.now() - fx.startTime) / 1000; if (age > 1.5) return null; const opacity = 1 - age / 1.5; if (fx.type === 'flash') { return <rect key={fx.id} x={cx - 15} y={cy - 15} width={30} height={30} fill="white" opacity={Math.max(0, opacity * 0.8)} style={{ pointerEvents: 'none' }} />; } if (fx.type === 'particle') { const r = 5 + age * 15; const particles = [0, 1, 2, 3, 4, 5].map(i => { const angle = (i / 6) * Math.PI * 2 + age * 3; const px = cx + Math.cos(angle) * r; const py = cy + Math.sin(angle) * r; return <circle key={i} cx={px} cy={py} r={2 * opacity} fill={fx.intensity && fx.intensity > 1 ? '#ff6b35' : '#e74c3c'} opacity={opacity} />; }); return <g key={fx.id}>{particles}</g>; } const r = fx.type === 'explosion' || fx.type === 'death' ? 15 + age * 25 : 10 + age * 12; return <circle key={fx.id} cx={cx} cy={cy} r={r} fill="none" stroke={fx.type === 'heal' ? '#2ecc71' : fx.type === 'death' ? '#ff6b35' : '#e74c3c'} strokeWidth={(3 + (fx.intensity || 1)) * opacity} opacity={opacity} style={{ pointerEvents: 'none' }} />; })}
       </svg>
-      {state.hoverHex && !!(state.revealed[state.hoverHex[0]]?.[state.hoverHex[1]]) && <HexTooltip state={state} col={state.hoverHex[0]} row={state.hoverHex[1]} />}
+      {/* Zoom controls */}
+      {isMobileView && (
+        <div className="absolute bottom-3 left-3 z-20 flex flex-col gap-1" style={{ pointerEvents: 'auto' }}>
+          <button onClick={() => setZoomLevel(prev => Math.min(3, prev + 0.25))} className="w-10 h-10 rounded-lg flex items-center justify-center text-white text-lg font-bold shadow-lg cursor-pointer" style={{ background: 'rgba(22,33,62,0.9)', border: '1px solid #0f3460' }}>+</button>
+          <button onClick={() => setZoomLevel(prev => Math.max(0.5, prev - 0.25))} className="w-10 h-10 rounded-lg flex items-center justify-center text-white text-lg font-bold shadow-lg cursor-pointer" style={{ background: 'rgba(22,33,62,0.9)', border: '1px solid #0f3460' }}>−</button>
+          <button onClick={() => setZoomLevel(1)} className="w-10 h-8 rounded-lg flex items-center justify-center text-white text-xs shadow-lg cursor-pointer" style={{ background: 'rgba(22,33,62,0.9)', border: '1px solid #0f3460' }}>↺</button>
+        </div>
+      )}
+      {state.hoverHex && !!(state.revealed[state.hoverHex[0]]?.[state.hoverHex[1]]) && <HexTooltip state={state} col={state.hoverHex[0]} row={state.hoverHex[1]} dynamicSize={dynamicSize} viewW={svgViewW} viewH={svgViewH} />}
     </div>
+    {/* Long Press Info Popup */}
+    {longPressInfo && (() => {
+      const cell = state.grid[longPressInfo.col]?.[longPressInfo.row];
+      const unit = getUnitAt(state.units, longPressInfo.col, longPressInfo.row);
+      if (!cell) return null;
+      const terrain = TERRAIN_DEFS[cell.terrain];
+      const bldg = cell.building ? BUILDING_DEFS[cell.building] : null;
+      const uDef = unit ? UNIT_DEFS[unit.type] : null;
+      return (
+        <div className="fixed inset-0 z-50 flex items-end justify-center" onClick={() => setLongPressInfo(null)}>
+          <div className="w-full max-w-md p-4 rounded-t-2xl space-y-2" style={{ background: 'linear-gradient(180deg, #16213e 0%, #0d1117 100%)', border: '2px solid #0f3460', borderBottom: 'none', paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }} onClick={e => e.stopPropagation()}>
+            <div className="w-10 h-1 rounded-full mx-auto" style={{ background: '#333' }} />
+            <div className="flex items-center justify-between">
+              <span className="text-white font-bold">{terrain.icon} {terrain.nameAr}</span>
+              <button onClick={() => setLongPressInfo(null)} className="text-gray-400 text-lg cursor-pointer">✕</button>
+            </div>
+            <div className="text-gray-300 text-sm">⚔️ هجوم: {terrain.atkBonus > 0 ? '+' : ''}{Math.round(terrain.atkBonus * 100)}% | 🛡️ دفاع: {terrain.defBonus > 0 ? '+' : ''}{Math.round(terrain.defBonus * 100)}% | 🚶 تكلفة حركة: {terrain.movCost}</div>
+            {bldg && <div className="p-2 rounded-lg" style={{ background: '#0f3460' }}><div className="text-yellow-400 font-bold">{bldg.icon} {bldg.nameAr} {'⭐'.repeat(cell.buildingLevel)}</div><div className="text-gray-300 text-xs">{bldg.desc}</div></div>}
+            {unit && (unit.owner === 'player' || state.revealed[longPressInfo.col]?.[longPressInfo.row]) && uDef && (
+              <div className="p-2 rounded-lg" style={{ background: unit.owner === 'player' ? 'rgba(39,174,96,0.15)' : 'rgba(192,57,43,0.15)', border: `1px solid ${unit.owner === 'player' ? '#27ae60' : '#c0392b'}` }}>
+                <div className="flex items-center gap-2"><span className="text-2xl">{uDef.icon}</span><div><div className="font-bold" style={{ color: unit.owner === 'player' ? '#53d769' : '#e94560' }}>{uDef.nameAr} ⭐{unit.level}</div><div className="text-gray-400 text-xs">{unit.owner === 'player' ? '🟢 وحدتك' : '🔴 عدو'}</div></div></div>
+                <div className="mt-1 grid grid-cols-4 gap-1 text-center text-xs">
+                  <div><div className="text-gray-500">❤️ HP</div><div className="text-white font-bold">{unit.hp}/{unit.maxHp}</div></div>
+                  <div><div className="text-gray-500">⚔️</div><div className="text-white font-bold">{unit.atk}</div></div>
+                  <div><div className="text-gray-500">🛡️</div><div className="text-white font-bold">{unit.def}</div></div>
+                  <div><div className="text-gray-500">🚶</div><div className="text-white font-bold">{unit.mov}</div></div>
+                </div>
+                <div className="mt-1 w-full h-2 rounded-full" style={{ background: '#333' }}><div className="h-2 rounded-full" style={{ width: `${(unit.hp / unit.maxHp) * 100}%`, background: unit.hp / unit.maxHp > 0.5 ? '#2ecc71' : unit.hp / unit.maxHp > 0.25 ? '#f39c12' : '#e74c3c' }} /></div>
+                {unit.statusEffects.length > 0 && <div className="mt-1 text-orange-400 text-xs">{unit.statusEffects.map(e => `${STATUS_EFFECT_DEFS[e.type].icon} ${STATUS_EFFECT_DEFS[e.type].nameAr} (${e.turnsLeft})`).join(' | ')}</div>}
+                {uDef.abilityNameAr && <div className="mt-1 text-blue-400 text-xs">⚡ {uDef.abilityNameAr}: {uDef.abilityDesc}</div>}
+              </div>
+            )}
+            {cell.strategicPoint && (() => { const spDef = STRATEGIC_POINT_DEFS[cell.strategicPoint]; const ownerName = cell.strategicOwner === 'player' ? 'أنت' : cell.strategicOwner === 'ai' ? 'عدو' : 'محايد'; return <div className="p-2 rounded-lg text-sm" style={{ background: '#0f3460' }}>{spDef.icon} {spDef.nameAr} ({ownerName})<div className="text-gray-400 text-xs mt-1">{spDef.desc}</div></div>; })()}
+          </div>
+        </div>
+      );
+    })()}
+    </>
   );
 }
-function HexTooltip({ state, col, row }: { state: GameState; col: number; row: number }) {
+function HexTooltip({ state, col, row, dynamicSize, viewW, viewH }: { state: GameState; col: number; row: number; dynamicSize: number; viewW: number; viewH: number }) {
   const cell = state.grid[col]?.[row]; const unit = getUnitAt(state.units, col, row);
   if (!cell) return null;
-  const terrain = TERRAIN_DEFS[cell.terrain]; const [cx, cy] = hexCenter(col, row);
+  const rCenter = (c: number, r: number): [number, number] => {
+    const x = c * dynamicSize * 1.5 + dynamicSize + 10;
+    const y = r * SQRT3 * dynamicSize + (c % 2 === 1 ? SQRT3 * dynamicSize / 2 : 0) + dynamicSize * SQRT3 / 2 + 10;
+    return [x, y];
+  };
+  const terrain = TERRAIN_DEFS[cell.terrain]; const [cx, cy] = rCenter(col, row);
   const bldg = cell.building ? BUILDING_DEFS[cell.building] : null;
   return (
-    <div className="absolute z-50 p-2 rounded-lg text-xs text-white pointer-events-none" style={{ background: 'rgba(22,33,62,0.95)', border: '1px solid #0f3460', left: `${(cx / ((state.gameCols || COLS) * HEX_SIZE * 1.5 + HEX_SIZE + 20)) * 100}%`, top: `${(cy / ((state.gameRows || ROWS) * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20)) * 100}%`, transform: 'translate(-50%, -120%)', maxWidth: '200px' }}>
+    <div className="absolute z-50 p-2 rounded-lg text-xs text-white pointer-events-none" style={{ background: 'rgba(22,33,62,0.95)', border: '1px solid #0f3460', left: `${(cx / viewW) * 100}%`, top: `${(cy / viewH) * 100}%`, transform: 'translate(-50%, -120%)', maxWidth: '200px' }}>
       <div className="font-bold">{terrain.icon} {terrain.nameAr} | دفاع: {terrain.defBonus > 0 ? '+' : ''}{Math.round(terrain.defBonus * 100)}%</div>
       {bldg && <div className="text-yellow-400">{bldg.icon} {bldg.nameAr}: {bldg.desc} {'⭐'.repeat(cell.buildingLevel)}</div>}
       {cell.strategicPoint && (() => { const spDef = STRATEGIC_POINT_DEFS[cell.strategicPoint]; const ownerName = cell.strategicOwner === 'player' ? 'أنت' : cell.strategicOwner === 'ai' ? 'عدو' : 'محايد'; return <div style={{ color: spDef.color }}>{spDef.icon} {spDef.nameAr} ({ownerName}): {spDef.desc}</div>; })()}
@@ -2117,9 +2313,53 @@ function MapEditorScreen({ onBack, onPlay }: { onBack: () => void; onPlay: (grid
   };
   const handleClear = () => { setEditorGrid(makeGrid()); };
   const handlePlay = () => { onPlay(editorGrid, editorCols, editorRows); };
-  const scale = editorCols <= 11 ? 0.7 : editorCols >= 16 ? 0.5 : 0.6;
-  const svgW = (editorCols * HEX_SIZE * 1.5 + HEX_SIZE + 20) * scale;
-  const svgH = (editorRows * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20) * scale;
+  // Dynamic sizing for editor - same approach as HexGridComp
+  const [editorContainerW, setEditorContainerW] = useState(0);
+  useEffect(() => { const update = () => setEditorContainerW(window.innerWidth); update(); window.addEventListener('resize', update); return () => window.removeEventListener('resize', update); }, []);
+  const editorIsMobile = editorContainerW < 768;
+  const edIdealHexW = (editorContainerW - 40) / (editorCols * 1.5 + 1);
+  const edIdealHexH = (window.innerHeight * 0.5 - 40) / (editorRows * SQRT3 + SQRT3 / 2);
+  const edDynamicSize = Math.max(14, Math.min(28, Math.floor(Math.min(edIdealHexW, edIdealHexH))));
+  const edRenderCenter = (col: number, row: number): [number, number] => {
+    const x = col * edDynamicSize * 1.5 + edDynamicSize + 10;
+    const y = row * SQRT3 * edDynamicSize + (col % 2 === 1 ? SQRT3 * edDynamicSize / 2 : 0) + edDynamicSize * SQRT3 / 2 + 10;
+    return [x, y];
+  };
+  const edViewW = editorCols * edDynamicSize * 1.5 + edDynamicSize + 20;
+  const edViewH = editorRows * SQRT3 * edDynamicSize + SQRT3 * edDynamicSize / 2 + 20;
+  // Touch support for editor
+  const edTouchStart = useRef<{ x: number; y: number; time: number } | null>(null);
+  const handleEditorTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length !== 1) return;
+    edTouchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, time: Date.now() };
+  };
+  const handleEditorTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (!edTouchStart.current || e.changedTouches.length === 0) return;
+    const endTouch = e.changedTouches[0];
+    const dx = Math.abs(endTouch.clientX - edTouchStart.current.x);
+    const dy = Math.abs(endTouch.clientY - edTouchStart.current.y);
+    const dt = Date.now() - edTouchStart.current.time;
+    if (dx < 15 && dy < 15 && dt < 500) {
+      const svgEl = e.currentTarget.querySelector('svg');
+      if (svgEl) {
+        const svgRect = svgEl.getBoundingClientRect();
+        const x = (endTouch.clientX - svgRect.left) * (edViewW / svgRect.width);
+        const y = (endTouch.clientY - svgRect.top) * (edViewH / svgRect.height);
+        // Find hex from point
+        const approxCol = Math.round((x - edDynamicSize - 10) / (edDynamicSize * 1.5));
+        for (let dc = -1; dc <= 1; dc++) {
+          const ci = approxCol + dc;
+          if (ci < 0 || ci >= editorCols) continue;
+          for (let ri = 0; ri < editorRows; ri++) {
+            const [cx, cy] = edRenderCenter(ci, ri);
+            const dist = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+            if (dist < edDynamicSize * 0.9) { handleHexClick(ci, ri); edTouchStart.current = null; return; }
+          }
+        }
+      }
+    }
+    edTouchStart.current = null;
+  };
   const terrains: TerrainType[] = ['plains', 'mountain', 'forest', 'water', 'desert', 'urban', 'swamp', 'oasis', 'road', 'ruins', 'ice', 'beach', 'volcanic'];
   const buildings: BuildingType[] = ['factory', 'hospital', 'fortress', 'tower', 'barracks', 'defense_tower', 'ammo_depot', 'bunker', 'hq'];
   const strategicPoints: StrategicPointType[] = ['supply_cache', 'weapons_depot', 'training_camp', 'gold_mine', 'command_post'];
@@ -2145,25 +2385,23 @@ function MapEditorScreen({ onBack, onPlay }: { onBack: () => void; onPlay: (grid
         {tool === 'terrain' && <div className="flex flex-wrap gap-1">{terrains.map(t => (<button key={t} onClick={() => setSelectedTerrain(t)} className={`px-2 py-1 rounded text-xs cursor-pointer ${selectedTerrain === t ? 'ring-2 ring-green-400' : ''}`} style={{ background: TERRAIN_DEFS[t].color }}>{TERRAIN_DEFS[t].icon} {TERRAIN_DEFS[t].nameAr}</button>))}</div>}
         {tool === 'building' && <div className="flex flex-wrap gap-1">{buildings.map(b => (<button key={b} onClick={() => setSelectedBuilding(b)} className={`px-2 py-1 rounded text-xs cursor-pointer ${selectedBuilding === b ? 'ring-2 ring-yellow-400' : ''}`} style={{ background: '#1a2332', color: '#fff' }}>{BUILDING_DEFS[b].icon} {BUILDING_DEFS[b].nameAr}</button>))}</div>}
         {tool === 'strategic_point' && <div className="flex flex-wrap gap-1">{strategicPoints.map(s => (<button key={s} onClick={() => setSelectedStrategic(s)} className={`px-2 py-1 rounded text-xs cursor-pointer ${selectedStrategic === s ? 'ring-2 ring-purple-400' : ''}`} style={{ background: '#1a2332', color: '#fff' }}>{STRATEGIC_POINT_DEFS[s].icon} {STRATEGIC_POINT_DEFS[s].nameAr}</button>))}</div>}
-        <div className="rounded-xl overflow-auto" style={{ background: '#0d1117', border: '2px solid #1e3a5f', maxHeight: '50vh' }}>
-          <svg width={svgW} height={svgH} viewBox={`0 0 ${(editorCols * HEX_SIZE * 1.5 + HEX_SIZE + 20)} ${(editorRows * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20)}`}>
-            <g transform={`scale(${scale})`}>
+        <div className="rounded-xl overflow-auto" style={{ background: '#0d1117', border: '2px solid #1e3a5f', maxHeight: '50vh', touchAction: 'pan-x pan-y' }} onTouchStart={handleEditorTouchStart} onTouchEnd={handleEditorTouchEnd}>
+          <svg width="100%" viewBox={`0 0 ${edViewW} ${edViewH}`}>
               {editorGrid.map((col, ci) => col.map((cell, ri) => {
                 if (ci >= editorCols || ri >= editorRows) return null;
-                const [cx, cy] = hexCenter(ci, ri);
+                const [cx, cy] = edRenderCenter(ci, ri);
                 const terrain = TERRAIN_DEFS[cell.terrain];
                 const bldg = cell.building ? BUILDING_DEFS[cell.building] : null;
                 const sp = cell.strategicPoint ? STRATEGIC_POINT_DEFS[cell.strategicPoint] : null;
                 return (
                   <g key={`${ci}-${ri}`}>
-                    <path d={hexPathStr(cx, cy, HEX_SIZE - 1)} fill={terrain.color} stroke="#2c3e50" strokeWidth={0.5} style={{ cursor: 'pointer' }} onClick={() => handleHexClick(ci, ri)} />
-                    <text x={cx} y={cy + 4} textAnchor="middle" fontSize="10" style={{ pointerEvents: 'none' }}>{terrain.icon}</text>
-                    {bldg && <text x={cx - 8} y={cy - 8} textAnchor="middle" fontSize="10" style={{ pointerEvents: 'none' }}>{bldg.icon}</text>}
-                    {sp && <text x={cx + 8} y={cy - 8} textAnchor="middle" fontSize="8" style={{ pointerEvents: 'none' }}>{sp.icon}</text>}
+                    <path d={hexPathStr(cx, cy, edDynamicSize - 1)} fill={terrain.color} stroke="#2c3e50" strokeWidth={0.5} style={{ cursor: 'pointer' }} onClick={() => handleHexClick(ci, ri)} />
+                    <text x={cx} y={cy + 4} textAnchor="middle" fontSize={edDynamicSize * 0.45} style={{ pointerEvents: 'none' }}>{terrain.icon}</text>
+                    {bldg && <text x={cx - 8} y={cy - 8} textAnchor="middle" fontSize={edDynamicSize * 0.45} style={{ pointerEvents: 'none' }}>{bldg.icon}</text>}
+                    {sp && <text x={cx + 8} y={cy - 8} textAnchor="middle" fontSize={Math.max(6, edDynamicSize * 0.3)} style={{ pointerEvents: 'none' }}>{sp.icon}</text>}
                   </g>
                 );
               }))}
-            </g>
           </svg>
         </div>
         {savedMaps[0].length > 0 && <div className="p-3 rounded-lg" style={{ background: '#16213e' }}><div className="text-white font-bold mb-2">💾 الخرائط المحفوظة</div><div className="space-y-1">{savedMaps[0].map((m: { id: string; name: string; createdAt: number }, i: number) => (<div key={m.id} className="flex items-center justify-between p-2 rounded bg-gray-800"><span className="text-white text-sm">{m.name}</span><div className="flex gap-1"><button onClick={() => handleLoad(i)} className="px-2 py-1 rounded bg-blue-600 text-white text-xs cursor-pointer">تحميل</button></div></div>))}</div></div>}
@@ -2178,10 +2416,21 @@ export default function WarGame() {
   const [profile, setProfile] = useState<PlayerProfile>(getDefaultProfile());
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
+  const [isLandscape, setIsLandscape] = useState(false);
   const effectTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => { setProfile(loadProfile()); }, [state.screen]);
-  // Detect mobile viewport
-  useEffect(() => { const check = () => { const m = window.innerWidth < 768; setIsMobile(m); if (m) setSidebarOpen(false); }; check(); window.addEventListener('resize', check); return () => window.removeEventListener('resize', check); }, []);
+  // Detect mobile viewport and orientation
+  useEffect(() => {
+    const check = () => {
+      const m = window.innerWidth < 768;
+      setIsMobile(m);
+      setIsLandscape(window.innerWidth > window.innerHeight);
+      if (m) setSidebarOpen(false);
+    };
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
   useEffect(() => { effectTimer.current = setInterval(() => { if (state.effects.length > 0) dispatch({ type: 'CLEAR_EFFECTS' }); if (state.animatingUnit && Date.now() - state.animatingUnit.startTime > 300) dispatch({ type: 'CLEAR_ANIMATING_UNIT' }); }, 100); return () => { if (effectTimer.current) clearInterval(effectTimer.current); }; }, [state.effects.length, state.animatingUnit]);
   useEffect(() => { if (state.phase === 'ai_turn' && state.animating) { const timer = setTimeout(() => dispatch({ type: 'AI_TURN_COMPLETE' }), 800); return () => clearTimeout(timer); } }, [state.phase, state.animating]);
   useEffect(() => { if (state.toasts.length > 0) { const timer = setTimeout(() => dispatch({ type: 'DISMISS_TOAST', id: state.toasts[0].id }), 3000); return () => clearTimeout(timer); } }, [state.toasts]);
@@ -2199,11 +2448,15 @@ export default function WarGame() {
   if (state.screen === 'profile') return <ProfileScreen profile={profile} setProfile={setProfile} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} />;
   if (state.screen === 'game_over') return <GameOverScreen state={state} onRestart={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} onProfile={() => { setProfile(loadProfile()); dispatch({ type: 'SET_SCREEN', screen: 'profile' }); }} />;
   return (
-    <div className="min-h-screen p-2 md:p-3" dir="rtl" style={{ background: '#0d1117' }}>
+    <div className="min-h-screen p-2 md:p-3" dir="rtl" style={{ background: '#0d1117', paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}>
       <GameHeader state={state} dispatch={dispatch} />
       <div className="flex flex-col lg:flex-row gap-2 relative">
         <div className="flex-1">
           <HexGridComp state={state} dispatch={dispatch} multiSelectedIds={state.multiSelectedIds} />
+          {/* Mobile bottom action bar */}
+          {isMobile && state.screen === 'playing' && (
+            <MobileActionBar state={state} dispatch={dispatch} />
+          )}
           {state.multiSelectedIds && state.multiSelectedIds.length > 1 && (state.phase === 'movement') && (
             <div className="flex items-center justify-center gap-2 mt-1">
               <div className="text-yellow-400 text-xs">🔗 {state.multiSelectedIds.length} وحدات محددة (Shift+click)</div>
@@ -2213,13 +2466,13 @@ export default function WarGame() {
           <div className="mt-2"><GameLog state={state} /></div>
         </div>
         {/* Mobile sidebar toggle */}
-        {isMobile && (
-          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="fixed bottom-4 left-4 z-40 w-12 h-12 rounded-full flex items-center justify-center text-white text-xl shadow-lg cursor-pointer" style={{ background: 'linear-gradient(135deg, #e94560, #c0392b)' }}>
+        {isMobile && !isLandscape && (
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="fixed z-40 w-12 h-12 rounded-full flex items-center justify-center text-white text-xl shadow-lg cursor-pointer" style={{ background: 'linear-gradient(135deg, #e94560, #c0392b)', bottom: 'calc(1rem + env(safe-area-inset-bottom))', left: 'calc(1rem + env(safe-area-inset-left))' }}>
             {sidebarOpen ? '✕' : '📊'}
           </button>
         )}
         {/* Sidebar */}
-        <div className={`${isMobile ? (sidebarOpen ? 'fixed inset-0 z-30 bg-black/80 pt-16 overflow-y-auto' : 'hidden') : ''} w-full lg:w-64 space-y-2`}>
+        <div className={`${isLandscape && isMobile ? 'w-full max-w-xs' : isMobile ? (sidebarOpen ? 'fixed inset-0 z-30 bg-black/80 pt-16 overflow-y-auto' : 'hidden') : ''} w-full lg:w-64 space-y-2`}>
           {isMobile && sidebarOpen && <button onClick={() => setSidebarOpen(false)} className="absolute top-2 left-2 text-white text-2xl z-50 cursor-pointer">✕</button>}
           {state.showMiniMap && <MiniMap state={state} />}
           {state.showStats && <StatsPanel state={state} />}

@@ -1,0 +1,17 @@
+{
+  "name": "معركة الاستراتيجية",
+  "short_name": "حرب استراتيجية",
+  "description": "لعبة حرب استراتيجية سداسية",
+  "start_url": "/strategic-war-game/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    {
+      "src": "/strategic-war-game/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
