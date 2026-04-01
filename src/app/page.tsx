@@ -1908,9 +1908,9 @@ function HexGridComp({ state, dispatch, multiSelectedIds }: { state: GameState; 
   const [containerWidth, setContainerWidth] = useState(0);
   const [containerHeight, setContainerHeight] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
-  const svgRef = useRef<SVGSVGElement>(null);
   const [zoomLevel, setZoomLevel] = useState(1);
-  const lastTouchDist = useRef(0);
+  const pinchStartDist = useRef(0);
+  const pinchStartZoom = useRef(1);
   const touchStartPos = useRef<{ x: number; y: number; time: number } | null>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [longPressInfo, setLongPressInfo] = useState<{ col: number; row: number } | null>(null);
@@ -1929,6 +1929,14 @@ function HexGridComp({ state, dispatch, multiSelectedIds }: { state: GameState; 
   };
   const svgViewW = gCols * dynamicSize * 1.5 + dynamicSize + 20;
   const svgViewH = gRows * SQRT3 * dynamicSize + SQRT3 * dynamicSize / 2 + 20;
+  // ViewBox-based zoom: SVG renders at higher resolution, CSS pixel size scales up
+  // At zoom=1, map fits container. At zoom>1, SVG is bigger and container scrolls.
+  const aspectRatio = svgViewW / svgViewH;
+  let fitW = containerWidth - 4;
+  let fitH = isMobileView ? containerHeight * 0.65 - 4 : containerHeight * 0.7 - 4;
+  if (fitW / fitH > aspectRatio) { fitW = fitH * aspectRatio; } else { fitH = fitW / aspectRatio; }
+  const svgPixelW = fitW * zoomLevel;
+  const svgPixelH = fitH * zoomLevel;
   // Touch event helper: convert pixel coords to hex coordinates
   const getHexFromPoint = (px: number, py: number): [number, number] | null => {
     const approxCol = Math.round((px - dynamicSize - 10) / (dynamicSize * 1.5));
@@ -1943,11 +1951,21 @@ function HexGridComp({ state, dispatch, multiSelectedIds }: { state: GameState; 
     }
     return null;
   };
+  const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -0.15 : 0.15;
+      setZoomLevel(prev => Math.max(0.5, Math.min(4, prev + delta)));
+    }
+  }, []);
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
     if (e.touches.length === 2) {
+      e.preventDefault();
+      e.stopPropagation();
       const dx = e.touches[0].clientX - e.touches[1].clientX;
       const dy = e.touches[0].clientY - e.touches[1].clientY;
-      lastTouchDist.current = Math.sqrt(dx * dx + dy * dy);
+      pinchStartDist.current = Math.sqrt(dx * dx + dy * dy);
+      pinchStartZoom.current = zoomLevel;
       if (longPressTimer.current) clearTimeout(longPressTimer.current);
       return;
     }
@@ -1986,18 +2004,21 @@ function HexGridComp({ state, dispatch, multiSelectedIds }: { state: GameState; 
       }
       touchStartPos.current = null;
     }
+    if (e.touches.length < 2) {
+      pinchStartDist.current = 0;
+    }
     if (longPressTimer.current) clearTimeout(longPressTimer.current);
   };
   const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
     if (e.touches.length === 2) {
+      e.preventDefault();
       const dx = e.touches[0].clientX - e.touches[1].clientX;
       const dy = e.touches[0].clientY - e.touches[1].clientY;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      if (lastTouchDist.current > 0) {
-        const scale = dist / lastTouchDist.current;
-        setZoomLevel(prev => Math.max(0.5, Math.min(3, prev * scale)));
+      if (pinchStartDist.current > 0) {
+        const newZoom = pinchStartZoom.current * (dist / pinchStartDist.current);
+        setZoomLevel(Math.max(0.5, Math.min(4, newZoom)));
       }
-      lastTouchDist.current = dist;
       if (longPressTimer.current) clearTimeout(longPressTimer.current);
       return;
     }
@@ -2033,8 +2054,8 @@ function HexGridComp({ state, dispatch, multiSelectedIds }: { state: GameState; 
     <>
     <div ref={containerRef} className={`relative rounded-xl overflow-auto ${state.shakeKey % 2 === 1 ? 'animate-shake' : ''}`}
       style={{ background: '#0d1117', border: '2px solid #1e3a5f', maxHeight: isMobileView ? 'calc(100vh - 180px)' : '70vh', touchAction: 'pan-x pan-y', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' as const }}
-      onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}>
-      <svg ref={svgRef} width="100%" viewBox={`0 0 ${svgViewW} ${svgViewH}`} className="block" style={{ transform: `scale(${zoomLevel})`, transformOrigin: 'top center' }}>
+      onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} onWheel={handleWheel}>
+      <svg width={svgPixelW} height={svgPixelH} viewBox={`0 0 ${svgViewW} ${svgViewH}`} className="block" style={{ minWidth: `${svgPixelW}px`, minHeight: `${svgPixelH}px` }}>
         <defs>
           <filter id="glow"><feGaussianBlur stdDeviation="3" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
           <filter id="selGlow"><feGaussianBlur stdDeviation="4" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
@@ -2086,12 +2107,19 @@ function HexGridComp({ state, dispatch, multiSelectedIds }: { state: GameState; 
         }))}
         {state.effects.map(fx => { const [cx, cy] = renderHexCenter(fx.col, fx.row); const age = (Date.now() - fx.startTime) / 1000; if (age > 1.5) return null; const opacity = 1 - age / 1.5; if (fx.type === 'flash') { return <rect key={fx.id} x={cx - 15} y={cy - 15} width={30} height={30} fill="white" opacity={Math.max(0, opacity * 0.8)} style={{ pointerEvents: 'none' }} />; } if (fx.type === 'particle') { const r = 5 + age * 15; const particles = [0, 1, 2, 3, 4, 5].map(i => { const angle = (i / 6) * Math.PI * 2 + age * 3; const px = cx + Math.cos(angle) * r; const py = cy + Math.sin(angle) * r; return <circle key={i} cx={px} cy={py} r={2 * opacity} fill={fx.intensity && fx.intensity > 1 ? '#ff6b35' : '#e74c3c'} opacity={opacity} />; }); return <g key={fx.id}>{particles}</g>; } const r = fx.type === 'explosion' || fx.type === 'death' ? 15 + age * 25 : 10 + age * 12; return <circle key={fx.id} cx={cx} cy={cy} r={r} fill="none" stroke={fx.type === 'heal' ? '#2ecc71' : fx.type === 'death' ? '#ff6b35' : '#e74c3c'} strokeWidth={(3 + (fx.intensity || 1)) * opacity} opacity={opacity} style={{ pointerEvents: 'none' }} />; })}
       </svg>
-      {/* Zoom controls */}
-      {isMobileView && (
-        <div className="absolute bottom-3 left-3 z-20 flex flex-col gap-1" style={{ pointerEvents: 'auto' }}>
-          <button onClick={() => setZoomLevel(prev => Math.min(3, prev + 0.25))} className="w-10 h-10 rounded-lg flex items-center justify-center text-white text-lg font-bold shadow-lg cursor-pointer" style={{ background: 'rgba(22,33,62,0.9)', border: '1px solid #0f3460' }}>+</button>
-          <button onClick={() => setZoomLevel(prev => Math.max(0.5, prev - 0.25))} className="w-10 h-10 rounded-lg flex items-center justify-center text-white text-lg font-bold shadow-lg cursor-pointer" style={{ background: 'rgba(22,33,62,0.9)', border: '1px solid #0f3460' }}>−</button>
-          <button onClick={() => setZoomLevel(1)} className="w-10 h-8 rounded-lg flex items-center justify-center text-white text-xs shadow-lg cursor-pointer" style={{ background: 'rgba(22,33,62,0.9)', border: '1px solid #0f3460' }}>↺</button>
+      {/* Zoom controls - visible on all devices when zoomed */}
+      {zoomLevel !== 1 && (
+        <div className="absolute top-3 right-3 z-20 flex items-center gap-1 rounded-lg px-2 py-1" style={{ background: 'rgba(22,33,62,0.95)', border: '1px solid #0f3460', pointerEvents: 'auto' }}>
+          <button onClick={(e) => { e.stopPropagation(); setZoomLevel(prev => Math.max(0.5, prev - 0.25)); }} className="w-8 h-8 rounded flex items-center justify-center text-white font-bold cursor-pointer hover:bg-white/10 active:bg-white/20 transition-colors" style={{ fontSize: '18px' }}>−</button>
+          <span className="text-white text-xs font-bold min-w-[40px] text-center">{Math.round(zoomLevel * 100)}%</span>
+          <button onClick={(e) => { e.stopPropagation(); setZoomLevel(prev => Math.min(4, prev + 0.25)); }} className="w-8 h-8 rounded flex items-center justify-center text-white font-bold cursor-pointer hover:bg-white/10 active:bg-white/20 transition-colors" style={{ fontSize: '18px' }}>+</button>
+          <button onClick={(e) => { e.stopPropagation(); setZoomLevel(1); }} className="w-8 h-8 rounded flex items-center justify-center text-white cursor-pointer hover:bg-white/10 active:bg-white/20 transition-colors text-xs" title="إعادة تعيين">↺</button>
+        </div>
+      )}
+      {/* Always show a small zoom toggle when at 100% */}
+      {zoomLevel === 1 && (
+        <div className="absolute top-3 right-3 z-20 flex items-center gap-1 rounded-lg px-2 py-1" style={{ background: 'rgba(22,33,62,0.8)', border: '1px solid #0f3460', pointerEvents: 'auto' }}>
+          <button onClick={(e) => { e.stopPropagation(); setZoomLevel(1.5); }} className="w-8 h-8 rounded flex items-center justify-center text-white cursor-pointer hover:bg-white/10 active:bg-white/20 transition-colors" title="تكبير">🔍+</button>
         </div>
       )}
       {state.hoverHex && !!(state.revealed[state.hoverHex[0]]?.[state.hoverHex[1]]) && <HexTooltip state={state} col={state.hoverHex[0]} row={state.hoverHex[1]} dynamicSize={dynamicSize} viewW={svgViewW} viewH={svgViewH} />}
