@@ -30,7 +30,7 @@ interface HexCell { col: number; row: number; terrain: TerrainType; building: Bu
 interface PlayerProfile { name: string; level: number; xp: number; xpToNext: number; totalWins: number; totalLosses: number; totalGames: number; totalKills: number; totalDamageDealt: number; achievements: string[]; unlockedPerks: string[]; rank: string }
 interface PlayerState { supply: number; morale: number; training: number }
 interface LogEntry { turn: number; msg: string; type: LogType }
-interface BattleEffect { id: string; col: number; row: number; type: 'attack' | 'explosion' | 'heal' | 'death'; startTime: number }
+interface BattleEffect { id: string; col: number; row: number; type: 'attack' | 'explosion' | 'heal' | 'death' | 'flash' | 'particle'; startTime: number; intensity?: number }
 interface DiplomacyEvent { type: string; msg: string; options: { text: string; effect: string }[] }
 interface ToastNotif { id: string; msg: string; icon: string; time: number }
 interface GameState {
@@ -69,9 +69,18 @@ interface GameState {
   showMiniMap: boolean;
   toasts: ToastNotif[];
   ceasefireActive: boolean;
+  ceasefireTurnsLeft: number;
   phaseTransition: string | null;
   tutorialActive: boolean; tutorialStep: number;
   customMapData: HexCell[][] | null;
+  gameCols: number; gameRows: number;
+  animatingUnit: { unitId: string; fromCol: number; fromRow: number; toCol: number; toRow: number; startTime: number } | null;
+  transportDeployMode: boolean;
+  transportDeployUnitId: string | null;
+  multiSelectedIds: string[];
+  deployedThisTurn: { unitId: string; cost: number }[];
+  showSaveLoad: boolean; saveLoadMode: 'save' | 'load';
+  settingsOpen: boolean;
 }
 type Action =
   | { type: 'START_GAME'; difficulty: Difficulty; mapPreset: MapPreset; aiPersonality?: AIPersonality; gameMode?: GameMode; campaignMission?: number; mapSize?: MapSize; victoryType?: VictoryType; customGrid?: HexCell[][] }
@@ -103,7 +112,16 @@ type Action =
   | { type: 'TOGGLE_MINIMAP' }
   | { type: 'DISMISS_DIPLOMACY'; effect: string }
   | { type: 'CLEAR_PHASE_TRANSITION' }
-  | { type: 'DISMISS_TOAST'; id: string };
+  | { type: 'DISMISS_TOAST'; id: string }
+  | { type: 'TRANSPORT_DEPLOY_SELECT'; unitType: UnitType }
+  | { type: 'SHOW_SAVE_LOAD'; mode: 'save' | 'load' }
+  | { type: 'HIDE_SAVE_LOAD' }
+  | { type: 'RETREAT_DEPLOYED_UNIT'; unitId: string }
+  | { type: 'TOGGLE_SETTINGS' }
+  | { type: 'TOGGLE_TUTORIAL' }
+  | { type: 'TOGGLE_SIDEBAR' }
+  | { type: 'CLEAR_ANIMATING_UNIT' }
+  | { type: 'CLEAR_MULTI_SELECT' };
 // ==================== CONSTANTS ====================
 let COLS = 14, ROWS = 10;
 const HEX_SIZE = 24;
@@ -111,13 +129,19 @@ const SQRT3 = Math.sqrt(3);
 // ==================== SOUND SYSTEM ====================
 const audioCtxRef = { current: null as AudioContext | null };
 function getAudioCtx(): AudioContext | null { if (typeof window === 'undefined') return null; if (!audioCtxRef.current) audioCtxRef.current = new AudioContext(); return audioCtxRef.current; }
-function playSound(type: 'attack' | 'move' | 'deploy' | 'build' | 'capture' | 'victory' | 'defeat' | 'levelup' | 'critical' | 'miss' | 'ability') {
+function playSound(type: 'attack' | 'move' | 'deploy' | 'build' | 'capture' | 'victory' | 'defeat' | 'levelup' | 'critical' | 'miss' | 'ability' | 'explosion' | 'heal', unitType?: string) {
   const ctx = getAudioCtx(); if (!ctx) return;
   try {
-    const osc = ctx.createOscillator(); const gain = ctx.createGain(); osc.connect(gain); gain.connect(ctx.destination); const now = ctx.currentTime;
+    const now = ctx.currentTime;
+    // Create reverb convolver for richer sound
+    const createReverb = () => { try { const conv = ctx.createConvolver(); const rate = ctx.sampleRate; const length = rate * 0.3; const impulse = ctx.createBuffer(2, length, rate); for (let ch = 0; ch < 2; ch++) { const data = impulse.getChannelData(ch); for (let i = 0; i < length; i++) { data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 2.5); } } conv.buffer = impulse; return conv; } catch { return null; } };
+    const reverb = createReverb();
+    const osc = ctx.createOscillator(); const gain = ctx.createGain(); osc.connect(gain); if (reverb && (type === 'attack' || type === 'explosion' || type === 'critical')) { gain.connect(reverb); reverb.connect(ctx.destination); } else { gain.connect(ctx.destination); }
     switch (type) {
-      case 'attack': osc.type='sawtooth'; osc.frequency.setValueAtTime(200,now); osc.frequency.linearRampToValueAtTime(80,now+0.15); gain.gain.setValueAtTime(0.15,now); gain.gain.linearRampToValueAtTime(0,now+0.15); osc.start(now); osc.stop(now+0.15); break;
-      case 'critical': osc.type='square'; osc.frequency.setValueAtTime(300,now); osc.frequency.linearRampToValueAtTime(600,now+0.1); gain.gain.setValueAtTime(0.2,now); gain.gain.linearRampToValueAtTime(0,now+0.2); osc.start(now); osc.stop(now+0.2); break;
+      case 'attack': { if (unitType === 'infantry' || unitType === 'medics' || unitType === 'engineers') { osc.type='sawtooth'; osc.frequency.setValueAtTime(300,now); osc.frequency.linearRampToValueAtTime(150,now+0.12); gain.gain.setValueAtTime(0.1,now); gain.gain.linearRampToValueAtTime(0,now+0.15); } else if (unitType === 'armor' || unitType === 'commando') { osc.type='sawtooth'; osc.frequency.setValueAtTime(150,now); osc.frequency.linearRampToValueAtTime(60,now+0.2); gain.gain.setValueAtTime(0.18,now); gain.gain.linearRampToValueAtTime(0,now+0.25); } else if (unitType === 'artillery' || unitType === 'rocket_artillery') { osc.type='sawtooth'; osc.frequency.setValueAtTime(80,now); osc.frequency.linearRampToValueAtTime(30,now+0.3); gain.gain.setValueAtTime(0.2,now); gain.gain.linearRampToValueAtTime(0,now+0.35); } else if (unitType === 'fighter_jet' || unitType === 'helicopter') { osc.type='square'; osc.frequency.setValueAtTime(500,now); osc.frequency.linearRampToValueAtTime(200,now+0.15); gain.gain.setValueAtTime(0.15,now); gain.gain.linearRampToValueAtTime(0,now+0.2); } else if (unitType === 'destroyer') { osc.type='sawtooth'; osc.frequency.setValueAtTime(100,now); osc.frequency.linearRampToValueAtTime(50,now+0.25); gain.gain.setValueAtTime(0.18,now); gain.gain.linearRampToValueAtTime(0,now+0.3); } else { osc.type='sawtooth'; osc.frequency.setValueAtTime(200,now); osc.frequency.linearRampToValueAtTime(80,now+0.15); gain.gain.setValueAtTime(0.15,now); gain.gain.linearRampToValueAtTime(0,now+0.2); } osc.start(now); osc.stop(now+0.4); break; }
+      case 'explosion': { osc.type='sawtooth'; osc.frequency.setValueAtTime(60,now); osc.frequency.linearRampToValueAtTime(20,now+0.4); gain.gain.setValueAtTime(0.25,now); gain.gain.exponentialRampToValueAtTime(0.001,now+0.5); osc.start(now); osc.stop(now+0.6); break; }
+      case 'heal': { osc.type='sine'; osc.frequency.setValueAtTime(400,now); osc.frequency.linearRampToValueAtTime(800,now+0.2); gain.gain.setValueAtTime(0.08,now); gain.gain.linearRampToValueAtTime(0,now+0.3); osc.start(now); osc.stop(now+0.35); break; }
+      case 'critical': osc.type='square'; osc.frequency.setValueAtTime(300,now); osc.frequency.linearRampToValueAtTime(600,now+0.1); gain.gain.setValueAtTime(0.2,now); gain.gain.linearRampToValueAtTime(0,now+0.25); osc.start(now); osc.stop(now+0.3); break;
       case 'miss': osc.type='sine'; osc.frequency.setValueAtTime(400,now); osc.frequency.linearRampToValueAtTime(200,now+0.1); gain.gain.setValueAtTime(0.08,now); gain.gain.linearRampToValueAtTime(0,now+0.1); osc.start(now); osc.stop(now+0.1); break;
       case 'move': osc.type='sine'; osc.frequency.setValueAtTime(300,now); osc.frequency.linearRampToValueAtTime(400,now+0.05); gain.gain.setValueAtTime(0.05,now); gain.gain.linearRampToValueAtTime(0,now+0.05); osc.start(now); osc.stop(now+0.05); break;
       case 'deploy': osc.type='triangle'; osc.frequency.setValueAtTime(400,now); osc.frequency.linearRampToValueAtTime(600,now+0.1); gain.gain.setValueAtTime(0.1,now); gain.gain.linearRampToValueAtTime(0,now+0.1); osc.start(now); osc.stop(now+0.1); break;
@@ -125,8 +149,8 @@ function playSound(type: 'attack' | 'move' | 'deploy' | 'build' | 'capture' | 'v
       case 'capture': osc.type='square'; osc.frequency.setValueAtTime(500,now); osc.frequency.linearRampToValueAtTime(700,now+0.15); gain.gain.setValueAtTime(0.12,now); gain.gain.linearRampToValueAtTime(500,now+0.3); osc.start(now); osc.stop(now+0.3); break;
       case 'levelup': osc.type='sine'; osc.frequency.setValueAtTime(400,now); osc.frequency.linearRampToValueAtTime(800,now+0.15); gain.gain.setValueAtTime(0.15,now); gain.gain.linearRampToValueAtTime(1000,now+0.3); osc.start(now); osc.stop(now+0.3); break;
       case 'ability': osc.type='sawtooth'; osc.frequency.setValueAtTime(300,now); osc.frequency.linearRampToValueAtTime(500,now+0.2); gain.gain.setValueAtTime(0.12,now); gain.gain.linearRampToValueAtTime(0,now+0.2); osc.start(now); osc.stop(now+0.2); break;
-      case 'victory': osc.type='sine'; osc.frequency.setValueAtTime(400,now); osc.frequency.linearRampToValueAtTime(600,now+0.2); gain.gain.linearRampToValueAtTime(800,now+0.4); gain.gain.setValueAtTime(0.15,now); gain.gain.linearRampToValueAtTime(0,now+0.5); osc.start(now); osc.stop(now+0.5); break;
-      case 'defeat': osc.type='sawtooth'; osc.frequency.setValueAtTime(300,now); osc.frequency.linearRampToValueAtTime(100,now+0.4); gain.gain.setValueAtTime(0.12,now); gain.gain.linearRampToValueAtTime(0,now+0.4); osc.start(now); osc.stop(now+0.4); break;
+      case 'victory': osc.type='sine'; osc.frequency.setValueAtTime(400,now); osc.frequency.linearRampToValueAtTime(600,now+0.15); gain.gain.setValueAtTime(0.15,now); gain.gain.linearRampToValueAtTime(0,now+0.2); osc.start(now); osc.stop(now+0.25); break;
+      case 'defeat': osc.type='sawtooth'; osc.frequency.setValueAtTime(300,now); osc.frequency.linearRampToValueAtTime(200,now+0.2); gain.gain.setValueAtTime(0.12,now); gain.gain.linearRampToValueAtTime(0,now+0.2); osc.start(now); osc.stop(now+0.25); break;
     }
   } catch {}
 }
@@ -298,7 +322,7 @@ function loadProfile(): PlayerProfile {
 }
 function saveProfile(p: PlayerProfile) { try { if (typeof window !== 'undefined') localStorage.setItem('warGame_profile', JSON.stringify(p)); } catch {} }
 function addXP(profile: PlayerProfile, amount: number): PlayerProfile {
-  let p = { ...profile, xp: p.xp + amount };
+  let p = { ...profile, xp: profile.xp + amount };
   while (p.xp >= p.xpToNext) {
     p.xp -= p.xpToNext; p.level++; p.xpToNext = Math.floor(p.xpToNext * 1.4);
     if (p.level === 3 && !p.unlockedPerks.includes('extra_supply')) p.unlockedPerks = [...p.unlockedPerks, 'extra_supply'];
@@ -339,7 +363,7 @@ function isAdjacentToEnemy(units: Unit[], col: number, row: number, owner: Owner
 }
 function isAirUnit(type: UnitType): boolean { return UNIT_DEFS[type].isAir === true; }
 function isNavalUnit(type: UnitType): boolean { return UNIT_DEFS[type].isNaval === true; }
-function calcValidMoves(unit: Unit, grid: HexCell[][], units: Unit[], tactic: TacticDef | null, secondary: TacticDef | null): [number, number][] {
+function calcValidMoves(unit: Unit, grid: HexCell[][], units: Unit[], tactic: TacticDef | null | undefined, secondary: TacticDef | null | undefined): [number, number][] {
   if (unit.mov === 0) return [];
   // Frozen units cannot move
   if (unit.statusEffects.some(e => e.type === 'frozen' || e.type === 'stunned')) return [];
@@ -380,7 +404,7 @@ function calcValidMoves(unit: Unit, grid: HexCell[][], units: Unit[], tactic: Ta
   }
   return [...new Map(result.map(r => [`${r[0]},${r[1]}`, r])).values()];
 }
-function calcValidAttacks(unit: Unit, units: Unit[], tactic: TacticDef | null): [number, number][] {
+function calcValidAttacks(unit: Unit, units: Unit[], tactic: TacticDef | null | undefined): [number, number][] {
   if (unit.range === 0) return [];
   // Frozen/stunned units cannot attack
   if (unit.statusEffects.some(e => e.type === 'frozen' || e.type === 'stunned')) return [];
@@ -401,7 +425,7 @@ function getStatusEffectAtkMod(unit: Unit): number {
   return 0;
 }
 function getStatusEffectDefMod(unit: Unit): number { return 0; }
-function calcDamage(attacker: Unit, defender: Unit, tactic: TacticDef | null, secondary: TacticDef | null, grid: HexCell[][], weather: WeatherType, attackerMorale: number, defenderMorale: number, isCounter: boolean): number {
+function calcDamage(attacker: Unit, defender: Unit, tactic: TacticDef | null | undefined, secondary: TacticDef | null | undefined, grid: HexCell[][], weather: WeatherType, attackerMorale: number, defenderMorale: number, isCounter: boolean, units: Unit[]): number {
   const aTerrain = getTerrainAt(grid, attacker.col, attacker.row);
   const dTerrain = getTerrainAt(grid, defender.col, defender.row);
   let atkStat = attacker.atk * (1 + (tactic?.atkMod ?? 0) + (secondary ? (secondary.atkMod ?? 0) * 0.5 : 0));
@@ -461,8 +485,8 @@ function calcDamage(attacker: Unit, defender: Unit, tactic: TacticDef | null, se
   if (profile.unlockedPerks.includes('warlord')) { if (attacker.owner === 'player') atkStat *= 1.1; if (defender.owner === 'player') defStat *= 1.1; }
   defStat *= (1 + getWeatherDefMod(weather));
   let bonus = 0;
-  if (tactic?.special === 'pincer' && checkPincer(attacker, defender)) bonus += 0.3;
-  if (tactic?.special === 'flanking' && Math.random() > 0.4) bonus += 0.5;
+  if (tactic?.special === 'pincer' && checkPincer(attacker, defender, units)) bonus += 0.3;
+  if (tactic?.special === 'flanking' && isFlanking(attacker, defender, units)) bonus += 0.5;
   if (tactic?.special === 'human_wave' && attacker.type === 'infantry') bonus += 0.2;
   if (tactic?.special === 'guerrilla' && aTerrain === 'forest') bonus += 0.4;
   if (tactic?.special === 'siege' && isSurrounded(defender, [attacker, defender])) bonus += 0.2;
@@ -470,17 +494,25 @@ function calcDamage(attacker: Unit, defender: Unit, tactic: TacticDef | null, se
   const totalAtk = atkStat * (1 + bonus);
   return Math.max(1, Math.round(totalAtk - defStat * 0.5 + (Math.random() - 0.5) * 6));
 }
-function checkPincer(attacker: Unit, defender: Unit): boolean {
-  const attackerNeighbors = getNeighbors(attacker.col, attacker.row);
+function checkPincer(attacker: Unit, defender: Unit, units: Unit[]): boolean {
+  const attackerAngle = Math.atan2(attacker.row - defender.row, attacker.col - defender.col);
   let alliesNearTarget = 0;
-  for (const [nc, nr] of attackerNeighbors) { if (hexDist(nc, nr, defender.col, defender.row) <= 2) alliesNearTarget++; }
-  return alliesNearTarget >= 2;
+  for (const [nc, nr] of getNeighbors(defender.col, defender.row)) {
+    const u = getUnitAt(units, nc, nr);
+    if (u && u.owner === attacker.owner && !u.isFake && u.id !== attacker.id && hexDist(nc, nr, defender.col, defender.row) <= 2) {
+      const allyAngle = Math.atan2(nr - defender.row, nc - defender.col);
+      let angleDiff = Math.abs(attackerAngle - allyAngle);
+      if (angleDiff > Math.PI) angleDiff = 2 * Math.PI - angleDiff;
+      if (angleDiff > Math.PI / 3) { alliesNearTarget++; }
+    }
+  }
+  return alliesNearTarget >= 1;
 }
-function calcCounterDamage(attacker: Unit, defender: Unit, tactic: TacticDef | null, secondary: TacticDef | null, grid: HexCell[][], weather: WeatherType, aMorale: number, dMorale: number): number {
+function calcCounterDamage(attacker: Unit, defender: Unit, tactic: TacticDef | null | undefined, secondary: TacticDef | null | undefined, grid: HexCell[][], weather: WeatherType, aMorale: number, dMorale: number, units: Unit[]): number {
   if (defender.type === 'artillery' && hexDist(attacker.col, attacker.row, defender.col, defender.row) > 1) return 0;
   if (defender.range === 0) return 0;
   if (hexDist(attacker.col, attacker.row, defender.col, defender.row) > defender.range) return 0;
-  return calcDamage(defender, attacker, tactic, secondary, grid, weather, dMorale, aMorale, true);
+  return calcDamage(defender, attacker, tactic, secondary, grid, weather, dMorale, aMorale, true, units);
 }
 // ==================== RNG & MAP GENERATION ====================
 function createRNG() { let s = Date.now(); return () => { s = (s * 16807) % 2147483647; return s / 2147483647; }; }
@@ -596,7 +628,7 @@ function findSafeSpawn(grid: HexCell[][], units: Unit[], colRange: [number, numb
   const positions: [number, number][] = [];
   for (let c = colRange[0]; c <= colRange[1]; c++) { for (let r = 0; r < ROWS; r++) {
     const t = grid[c][r].terrain;
-    if (forType && isAirUnit(forType)) { /* air can spawn anywhere non-water */ if (t !== 'water' || getUnitAt(units, c, r)) continue; positions.push([c, r]); continue; }
+    if (forType && isAirUnit(forType)) { /* air can spawn anywhere non-mountain and non-occupied */ if (t === 'mountain' || getUnitAt(units, c, r)) continue; positions.push([c, r]); continue; }
     if (forType && isNavalUnit(forType)) { if (t !== 'water' && t !== 'beach') continue; if (getUnitAt(units, c, r)) continue; positions.push([c, r]); continue; }
     if (t === 'water' || t === 'mountain' || getUnitAt(units, c, r)) continue;
     positions.push([c, r]);
@@ -721,13 +753,20 @@ const initialState: GameState = {
   aiPersonality: 'balanced' as AIPersonality, gameMode: 'skirmish' as GameMode,
   campaignMission: 0, mapSize: 'medium' as MapSize, upgradeMode: false, soundEnabled: true,
   victoryType: 'annihilation', diplomacyEvent: null, dominationPlayerTurns: 0, dominationAiTurns: 0,
-  showMiniMap: false, toasts: [], ceasefireActive: false, phaseTransition: null,
+  showMiniMap: false, toasts: [], ceasefireActive: false, ceasefireTurnsLeft: 0, phaseTransition: null,
   tutorialActive: false, tutorialStep: 0, customMapData: null,
+  gameCols: 14, gameRows: 10,
+  animatingUnit: null,
+  transportDeployMode: false, transportDeployUnitId: null,
+  multiSelectedIds: [],
+  deployedThisTurn: [],
+  showSaveLoad: false, saveLoadMode: 'save',
+  settingsOpen: false,
 };
 function gameReducer(state: GameState, action: Action): GameState {
   switch (action.type) {
     case 'START_GAME': {
-      const mapSize = action.mapSize || 'medium'; const sz = MAP_SIZES[mapSize]; COLS = sz.cols; ROWS = sz.rows;
+      const mapSize = action.mapSize || 'medium'; const sz = MAP_SIZES[mapSize]; COLS = sz.cols; ROWS = sz.rows; const gameCols = sz.cols; const gameRows = sz.rows;
       let grid: HexCell[][]; let units: Unit[];
       if (action.customGrid) { grid = action.customGrid; units = createUnitsForCustomMap(grid); }
       else { grid = generateMapForPreset(action.mapPreset); units = createUnitsForMap(action.mapPreset); }
@@ -750,11 +789,11 @@ function gameReducer(state: GameState, action: Action): GameState {
         if (aHQ >= 0) { const ac = Math.floor(aHQ / ROWS); const ar = aHQ % ROWS; grid[ac][ar] = { ...grid[ac][ar], building: 'hq', buildingOwner: 'ai' as Owner, buildingLevel: 1 }; }
       }
       for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
-        if (grid[c][r].strategicPoint) { const sp = STRATEGIC_POINT_DEFS[grid[c][r].strategicPoint]; startLog.push({ turn: 1, msg: `🏛️ ${sp.icon} ${sp.nameAr} ظهرت على الخريطة!`, type: 'system' }); }
+        if (grid[c][r].strategicPoint) { const sp = STRATEGIC_POINT_DEFS[grid[c][r].strategicPoint!]; startLog.push({ turn: 1, msg: `🏛️ ${sp.icon} ${sp.nameAr} ظهرت على الخريطة!`, type: 'system' as const }); }
       }
-      return { ...initialState, screen: 'playing', phase: 'planning', turn: 1, difficulty: action.difficulty, mapPreset: action.mapPreset, grid, units, revealed, weather: getWeather(), weatherTurnsLeft: 3, player: { supply: 20 + extraSupply, morale: 100, training: 0 }, log: startLog, aiPersonality, gameMode, campaignMission: action.campaignMission || 0, mapSize: mapSize as MapSize, soundEnabled: state.soundEnabled, victoryType, customMapData: action.customGrid || null };
+      return { ...initialState, screen: 'playing', phase: 'planning', turn: 1, difficulty: action.difficulty, mapPreset: action.mapPreset, grid, units, revealed, weather: getWeather(), weatherTurnsLeft: 3, player: { supply: 20 + extraSupply, morale: 100, training: 0 }, log: startLog, aiPersonality, gameMode, campaignMission: action.campaignMission || 0, mapSize: mapSize as MapSize, soundEnabled: state.soundEnabled, victoryType, customMapData: action.customGrid || null, gameCols, gameRows };
     }
-    case 'SET_SCREEN': return { ...state, screen: action.screen };
+    case 'SET_SCREEN': { if (action.screen === 'menu') { COLS = 14; ROWS = 10; } return { ...state, screen: action.screen }; }
     case 'SELECT_TACTIC': return action.secondary ? { ...state, secondaryTacticId: action.id } : { ...state, tacticId: action.id };
     case 'CONFIRM_TACTIC': {
       const tactic = TACTICS.find(t => t.id === state.tacticId);
@@ -767,7 +806,11 @@ function gameReducer(state: GameState, action: Action): GameState {
       if (tactic?.special === 'deception') { for (let i = 0; i < 2; i++) { for (let c = 0; c <= 2; c++) { for (let r = 0; r < ROWS; r++) { if (!getUnitAt(newUnits, c, r) && getTerrainAt(state.grid, c, r) !== 'water') { newUnits.push({ ...createUnit(Date.now() + i, 'infantry', 'player', c, r), isFake: true, fakeTurns: 2, moved: true, attacked: true }); break; } } } } newLog.push({ turn: state.turn, msg: '🎭 تم إنشاء وحدات وهمية!', type: 'tactic' }); }
       return { ...state, phase: 'movement', playerTactic: state.tacticId, secondaryPlayerTactic: state.secondaryTacticId, units: newUnits, log: newLog, selectedId: null, validMoves: [], validAttacks: [], deployMode: null, tacticsUsed, playerUsedPincer, playerUsedBlitzkrieg, playerUsedGuerrilla, playerUsedSiege, phaseTransition: 'movement' };
     }
-    case 'HEX_CLICK': return handleHexClick(state, action.col, action.row);
+    case 'HEX_CLICK': {
+      const hs = handleHexClick(state, action.col, action.row);
+      // Multi-select with Shift: store in state (handled by clicking hexes)
+      return hs;
+    }
     case 'HEX_HOVER': return { ...state, hoverHex: action.col !== null && action.row !== null ? [action.col, action.row] : null };
     case 'END_MOVEMENT': return { ...state, phase: 'attack', selectedId: null, validMoves: [], validAttacks: [], damagePreview: null, log: [...state.log, { turn: state.turn, msg: '🎯 مرحلة الهجوم', type: 'info' }], phaseTransition: 'attack' };
     case 'END_ATTACK': return { ...state, phase: 'ai_turn', selectedId: null, validMoves: [], validAttacks: [], damagePreview: null, animating: true, log: [...state.log, { turn: state.turn, msg: '🤖 دور العدو...', type: 'info' }], phaseTransition: 'ai_turn' };
@@ -777,7 +820,7 @@ function gameReducer(state: GameState, action: Action): GameState {
     case 'CONFIRM_ATTACK': return handleConfirmAttack(state);
     case 'CANCEL_ATTACK': return { ...state, showBattleModal: null };
     case 'AI_TURN_COMPLETE': return handleAIComplete(state);
-    case 'SAVE_GAME': { try { if (typeof window !== 'undefined') localStorage.setItem(`warGame_save_${action.slot}`, JSON.stringify(state)); } catch {} return state; }
+    case 'SAVE_GAME': { try { if (typeof window !== 'undefined') { const saveData = { ...state, savedAt: Date.now() }; localStorage.setItem(`warGame_save_${action.slot}`, JSON.stringify(saveData)); } } catch {} return { ...state, toasts: [...state.toasts, { id: `save_${Date.now()}`, msg: '💾 تم الحفظ!', icon: '💾', time: Date.now() }] }; }
     case 'LOAD_GAME': { try { if (typeof window !== 'undefined') { const d = localStorage.getItem(`warGame_save_${action.slot}`); if (d) return JSON.parse(d); } } catch {} return state; }
     case 'CLEAR_EFFECTS': return { ...state, effects: state.effects.filter(e => Date.now() - e.startTime < 1200) };
     case 'ENTER_BUILD_MODE': { const profile = loadProfile(); const maxBuilds = profile.unlockedPerks.includes('rapid_build') ? 2 : 1; if (state.playerBuildCount >= maxBuilds) return state; const cost = BUILDING_COSTS[action.buildingType]; if (state.player.supply < cost) return state; const placements = calcBuildPlacements(state); if (placements.length === 0) return state; return { ...state, buildMode: action.buildingType, validBuildPlacements: placements, deployMode: null }; }
@@ -793,6 +836,28 @@ function gameReducer(state: GameState, action: Action): GameState {
     case 'CLEAR_PHASE_TRANSITION': return { ...state, phaseTransition: null };
     case 'DISMISS_TOAST': return { ...state, toasts: state.toasts.filter(t => t.id !== action.id) };
     case 'RETREAT_UNIT': { if (!state.selectedId || state.phase !== 'attack') return state; const rUnit = state.units.find(u => u.id === state.selectedId); if (!rUnit || rUnit.owner !== 'player' || rUnit.attacked) return state; const rTactic = TACTICS.find(t => t.id === state.playerTactic); const rSecondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic); const enemies = state.units.filter(u => u.owner === 'ai' && !u.isFake && u.hp > 0); if (enemies.length === 0) return state; const moves = calcValidMoves(rUnit, state.grid, state.units, rTactic, rSecondary); const retreatMoves = moves.filter(([mc, mr]) => { const nd = Math.min(...enemies.map(e => hexDist(mc, mr, e.col, e.row))); const cd = Math.min(...enemies.map(e => hexDist(rUnit.col, rUnit.row, e.col, e.row))); return nd > cd; }); if (retreatMoves.length === 0) return state; retreatMoves.sort((a, b) => { const ad = Math.min(...enemies.map(e => hexDist(a[0], a[1], e.col, e.row))); const bd = Math.min(...enemies.map(e => hexDist(b[0], b[1], e.col, e.row))); return bd - ad; }); const [nc, nr] = retreatMoves[0]; return { ...state, units: state.units.map(u => u.id === rUnit.id ? { ...u, col: nc, row: nr, moved: true, attacked: true } : u), selectedId: null, validMoves: [], validAttacks: [], log: [...state.log, { turn: state.turn, msg: `↩️ ${UNIT_DEFS[rUnit.type].nameAr} انسحب`, type: 'movement' as const }] }; }
+    case 'TRANSPORT_DEPLOY_SELECT': {
+      if (!state.transportDeployMode || !state.transportDeployUnitId) return state;
+      const tUnit = state.units.find(u => u.id === state.transportDeployUnitId);
+      if (!tUnit || !state.validMoves.length) return state;
+      const [dc, dr] = state.validMoves[0];
+      const newUnit = createUnit(Date.now(), action.unitType, 'player', dc, dr);
+      newUnit.moved = true; newUnit.attacked = true;
+      return { ...state, units: [...state.units, newUnit], transportDeployMode: false, transportDeployUnitId: null, selectedId: null, validMoves: [], validAttacks: [], log: [...state.log, { turn: state.turn, msg: `🛳️ إنزال ${UNIT_DEFS[action.unitType].nameAr}!`, type: 'tactic' }] };
+    }
+    case 'RETREAT_DEPLOYED_UNIT': {
+      const depIdx = state.deployedThisTurn.findIndex(d => d.unitId === action.unitId);
+      if (depIdx < 0) return state;
+      const dep = state.deployedThisTurn[depIdx];
+      return { ...state, units: state.units.filter(u => u.id !== action.unitId), deployedThisTurn: state.deployedThisTurn.filter(d => d.unitId !== action.unitId), player: { ...state.player, supply: state.player.supply + dep.cost }, log: [...state.log, { turn: state.turn, msg: `↩️ سحب وحدة +${dep.cost} إمداد`, type: 'system' }] };
+    }
+    case 'SHOW_SAVE_LOAD': return { ...state, showSaveLoad: true, saveLoadMode: action.mode };
+    case 'HIDE_SAVE_LOAD': return { ...state, showSaveLoad: false };
+    case 'TOGGLE_SETTINGS': return { ...state, settingsOpen: !state.settingsOpen };
+    case 'TOGGLE_TUTORIAL': return { ...state, tutorialActive: !state.tutorialActive };
+    case 'TOGGLE_SIDEBAR': return state;
+    case 'CLEAR_ANIMATING_UNIT': return { ...state, animatingUnit: null };
+    case 'CLEAR_MULTI_SELECT': return { ...state, multiSelectedIds: [] };
     default: return state;
   }
 }
@@ -805,7 +870,7 @@ function handleDiplomacyEffect(state: GameState, effect: string): GameState {
   let newAchievements = [...state.achievements];
   const addAch = (id: string) => { if (!newAchievements.includes(id)) newAchievements.push(id); };
   switch (effect) {
-    case 'ceasefire_accept': state = { ...state, ceasefireActive: true }; newLog.push({ turn: state.turn, msg: '🤝 هدنة! لا هجوم لدورين', type: 'system' }); addAch('diplomat'); break;
+    case 'ceasefire_accept': state = { ...state, ceasefireActive: true, ceasefireTurnsLeft: 2 }; newLog.push({ turn: state.turn, msg: '🤝 هدنة! لا هجوم لدورين', type: 'system' }); addAch('diplomat'); break;
     case 'ceasefire_reject': newLog.push({ turn: state.turn, msg: '⚔️ رفضت هدنة العدو!', type: 'system' }); break;
     case 'intel_accept': { const revealed = state.revealed.map(r => [...r]); for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) revealed[c][r] = true; state = { ...state, revealed }; newLog.push({ turn: state.turn, msg: '📋 كشف الخريطة بالكامل!', type: 'system' }); break; }
     case 'surrender_accept': return { ...state, winner: 'player', screen: 'game_over', diplomacyEvent: null, achievements: newAchievements };
@@ -828,7 +893,7 @@ function handleAbilityUse(state: GameState, unitId: string): GameState {
     const tactic = TACTICS.find(t => t.id === state.playerTactic); const secondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic);
     const enemies = state.units.filter(e => e.owner !== 'player' && !e.isFake && hexDist(unit.col, unit.row, e.col, e.row) <= 2);
     newUnits = state.units.map(u => u.id === unitId ? { ...newUnit } : u); newUnits[uIdx] = newUnit;
-    for (const e of enemies) { const dmg = Math.round(calcDamage(unit, e, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false) * 0.6); const eIdx = newUnits.findIndex(u => u.id === e.id);
+    for (const e of enemies) { const dmg = Math.round(calcDamage(unit, e, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false, newUnits) * 0.6); const eIdx = newUnits.findIndex(u => u.id === e.id);
       if (eIdx >= 0) { let hp = newUnits[eIdx].hp - dmg; log.push({ turn: state.turn, msg: `💣 قصف مكثف على ${UNIT_DEFS[e.type].nameAr} - ${dmg}`, type: 'attack' }); newUnits[eIdx] = { ...newUnits[eIdx], hp, statusEffects: [...newUnits[eIdx].statusEffects, { type: 'burning' as StatusEffectType, turnsLeft: 2, source: 'artillery' }] }; if (hp <= 0) { newUnits = newUnits.filter(u => u.id !== e.id); log.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[e.type].nameAr} دُمر!`, type: 'system' }); } }
     }
     newUnit.abilityCooldownLeft = def.abilityCooldown;
@@ -849,7 +914,7 @@ function handleAbilityUse(state: GameState, unitId: string): GameState {
     const tactic = TACTICS.find(t => t.id === state.playerTactic); const secondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic);
     const enemies = state.units.filter(e => e.owner !== 'player' && !e.isFake && hexDist(unit.col, unit.row, e.col, e.row) <= 3);
     newUnits = state.units.map(u => u.id === unitId ? { ...newUnit } : u); newUnits[uIdx] = newUnit;
-    for (const e of enemies) { const dmg = Math.round(calcDamage(unit, e, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false) * 0.5); const eIdx = newUnits.findIndex(u => u.id === e.id);
+    for (const e of enemies) { const dmg = Math.round(calcDamage(unit, e, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false, newUnits) * 0.5); const eIdx = newUnits.findIndex(u => u.id === e.id);
       if (eIdx >= 0) { let hp = newUnits[eIdx].hp - dmg; log.push({ turn: state.turn, msg: `🎆 قصف صاروخي - ${dmg}`, type: 'attack' }); newUnits[eIdx] = { ...newUnits[eIdx], hp, statusEffects: [...newUnits[eIdx].statusEffects, { type: 'burning' as StatusEffectType, turnsLeft: 2, source: 'rocket' }] }; if (hp <= 0) { newUnits = newUnits.filter(u => u.id !== e.id); log.push({ turn: state.turn, msg: `  ✗ دُمر!`, type: 'system' }); } }
     }
     newUnit.abilityCooldownLeft = def.abilityCooldown;
@@ -861,7 +926,7 @@ function handleAbilityUse(state: GameState, unitId: string): GameState {
     const tactic = TACTICS.find(t => t.id === state.playerTactic); const secondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic);
     const enemies = state.units.filter(e => e.owner !== 'player' && !e.isFake && hexDist(unit.col, unit.row, e.col, e.row) <= 2);
     newUnits = state.units.map(u => u.id === unitId ? { ...newUnit } : u); newUnits[uIdx] = newUnit;
-    for (const e of enemies) { const dmg = Math.round(calcDamage(unit, e, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false) * 0.6); const eIdx = newUnits.findIndex(u => u.id === e.id);
+    for (const e of enemies) { const dmg = Math.round(calcDamage(unit, e, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false, newUnits) * 0.6); const eIdx = newUnits.findIndex(u => u.id === e.id);
       if (eIdx >= 0) { let hp = newUnits[eIdx].hp - dmg; log.push({ turn: state.turn, msg: `🚁 قصف جوي على ${UNIT_DEFS[e.type].nameAr} - ${dmg}`, type: 'attack' }); newUnits[eIdx] = { ...newUnits[eIdx], hp, statusEffects: [...newUnits[eIdx].statusEffects, { type: 'burning' as StatusEffectType, turnsLeft: 2, source: 'helicopter' }] }; if (hp <= 0) { newUnits = newUnits.filter(u => u.id !== e.id); log.push({ turn: state.turn, msg: `  ✗ دُمر!`, type: 'system' }); } }
     }
     newUnit.abilityCooldownLeft = def.abilityCooldown;
@@ -872,7 +937,7 @@ function handleAbilityUse(state: GameState, unitId: string): GameState {
     const tactic = TACTICS.find(t => t.id === state.playerTactic); const secondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic);
     const enemies = state.units.filter(e => e.owner !== 'player' && !e.isFake && !isNavalUnit(e.type) && hexDist(unit.col, unit.row, e.col, e.row) <= 3);
     newUnits = state.units.map(u => u.id === unitId ? { ...newUnit } : u); newUnits[uIdx] = newUnit;
-    for (const e of enemies) { const dmg = Math.round(calcDamage(unit, e, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false) * 0.7); const eIdx = newUnits.findIndex(u => u.id === e.id);
+    for (const e of enemies) { const dmg = Math.round(calcDamage(unit, e, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false, newUnits) * 0.7); const eIdx = newUnits.findIndex(u => u.id === e.id);
       if (eIdx >= 0) { let hp = newUnits[eIdx].hp - dmg; log.push({ turn: state.turn, msg: `🚢 قصف ساحلي على ${UNIT_DEFS[e.type].nameAr} - ${dmg}`, type: 'attack' }); if (hp <= 0) { newUnits = newUnits.filter(u => u.id !== e.id); log.push({ turn: state.turn, msg: `  ✗ دُمر!`, type: 'system' }); } else { newUnits[eIdx] = { ...newUnits[eIdx], hp }; } }
     }
     newUnit.abilityCooldownLeft = def.abilityCooldown;
@@ -958,7 +1023,7 @@ function handleHexClick(state: GameState, col: number, row: number): GameState {
     const discount = nearBarracks ? 0.75 : 1; const finalCost = Math.floor(cost * discount);
     if (state.player.supply < finalCost) return state;
     const def = UNIT_DEFS[deployType]; const newUnit = createUnit(Date.now(), deployType, 'player', col, row);
-    return { ...state, units: [...state.units, { ...newUnit, moved: true, attacked: true }], player: { ...state.player, supply: state.player.supply - finalCost }, deployMode: null, playerDeployCount: state.playerDeployCount + 1, log: [...state.log, { turn: state.turn, msg: `✦ نشر ${def.nameAr} (${state.playerDeployCount + 1}/${maxDeploys})`, type: 'tactic' }] };
+    const deployedUnit = { ...newUnit, moved: true, attacked: true }; return { ...state, units: [...state.units, deployedUnit], player: { ...state.player, supply: state.player.supply - finalCost }, deployMode: null, playerDeployCount: state.playerDeployCount + 1, deployedThisTurn: [...state.deployedThisTurn, { unitId: deployedUnit.id, cost: finalCost }], log: [...state.log, { turn: state.turn, msg: `✦ نشر ${def.nameAr} (${state.playerDeployCount + 1}/${maxDeploys})`, type: 'tactic' }] };
   }
   const clicked = getUnitAt(state.units, col, row); const tactic = TACTICS.find(t => t.id === state.playerTactic); const secondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic);
   if (state.phase === 'movement') {
@@ -968,22 +1033,18 @@ function handleHexClick(state: GameState, col: number, row: number): GameState {
       if (sel && sel.type === 'transport_ship' && sel.abilityActive) {
         const t = getTerrainAt(state.grid, col, row);
         if (t !== 'water' && t !== 'mountain' && !getUnitAt(state.units, col, row)) {
-          const deployTypes: UnitType[] = ['infantry', 'medics', 'engineers'];
-          const dType = deployTypes[Math.floor(Math.random() * deployTypes.length)];
-          const newUnit = createUnit(Date.now(), dType, 'player', col, row);
-          newUnit.moved = true; newUnit.attacked = true;
-          return { ...state, units: [...state.units, newUnit], selectedId: null, validMoves: [], validAttacks: [], log: [...state.log, { turn: state.turn, msg: `🛳️ إنزال ${UNIT_DEFS[dType].nameAr}!`, type: 'tactic' }] };
+          return { ...state, transportDeployMode: true, transportDeployUnitId: sel.id, selectedId: sel.id, validMoves: [[col, row]], validAttacks: [], log: [...state.log, { turn: state.turn, msg: '🛳️ اختر نوع الوحدة للإنزال', type: 'info' }] };
         }
       }
       if (sel && state.validMoves.some(([mc, mr]) => mc === col && mr === row)) {
         const prev = JSON.parse(JSON.stringify(state)); const newUnits = state.units.map(u => u.id === sel.id ? { ...u, col, row, moved: true } : u);
         const attacks = calcValidAttacks({ ...sel, col, row }, newUnits, tactic);
-        const moveLog = [...state.log, { turn: state.turn, msg: `▸ ${UNIT_DEFS[sel.type].nameAr} تحرك`, type: 'movement' }];
+        const moveLog: LogEntry[] = [...state.log, { turn: state.turn, msg: `▸ ${UNIT_DEFS[sel.type].nameAr} تحرك`, type: 'movement' as const }];
         const destCell = state.grid[col]?.[row]; let newGrid = state.grid; let spCaptured = state.strategicPointsCaptured;
         if (destCell?.strategicPoint && destCell.strategicOwner !== 'player') { newGrid = state.grid.map(c => c.map(cell => cell.col === col && cell.row === row ? { ...cell, strategicOwner: 'player' as Owner, garrisonTurn: state.turn } : cell)); moveLog.push({ turn: state.turn, msg: `🏛️ احتلال!`, type: 'system' }); playSound('capture'); spCaptured++; }
         // Capture buildings
         if (destCell?.building && destCell.buildingOwner !== 'player' && destCell.buildingOwner !== null) { newGrid = newGrid.map(c => c.map(cell => cell.col === col && cell.row === row ? { ...cell, buildingOwner: 'player' as Owner } : cell)); moveLog.push({ turn: state.turn, msg: `🏗️ احتلال ${BUILDING_DEFS[destCell.building!].nameAr}!`, type: 'system' }); playSound('capture'); }
-        return { ...state, grid: newGrid, units: newUnits, selectedId: sel.id, validMoves: [], validAttacks: attacks, previousState: prev, strategicPointsCaptured: spCaptured, log: moveLog };
+        return { ...state, grid: newGrid, units: newUnits, selectedId: sel.id, validMoves: [], validAttacks: attacks, previousState: prev, strategicPointsCaptured: spCaptured, log: moveLog, animatingUnit: { unitId: sel.id, fromCol: sel.col, fromRow: sel.row, toCol: col, toRow: row, startTime: Date.now() } };
       }
       if (clicked && clicked.owner === 'player' && !clicked.isFake && !clicked.moved) return { ...state, selectedId: clicked.id, validMoves: calcValidMoves(clicked, state.grid, state.units, tactic, secondary), validAttacks: calcValidAttacks(clicked, state.units, tactic), damagePreview: null };
       return { ...state, selectedId: null, validMoves: [], validAttacks: [], damagePreview: null };
@@ -995,9 +1056,10 @@ function handleHexClick(state: GameState, col: number, row: number): GameState {
       const sel = state.units.find(u => u.id === state.selectedId);
       if (sel && !sel.attacked && clicked && clicked.owner !== 'player' && state.validAttacks.some(([ac, ar]) => ac === col && ar === row)) {
         if (state.ceasefireActive) return { ...state, log: [...state.log, { turn: state.turn, msg: '🏳️ هدنة سارية!', type: 'system' }] };
-        const dmg = calcDamage(sel, clicked, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false);
-        const cDmg = calcCounterDamage(sel, clicked, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale);
-        return { ...state, showBattleModal: { attacker: sel, defender: clicked, dmg, counterDmg: cDmg } };
+        const prev = JSON.parse(JSON.stringify(state));
+        const dmg = calcDamage(sel, clicked, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false, state.units);
+        const cDmg = calcCounterDamage(sel, clicked, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, state.units);
+        return { ...state, showBattleModal: { attacker: sel, defender: clicked, dmg, counterDmg: cDmg }, previousState: prev };
       }
       if (clicked && clicked.owner === 'player' && !clicked.isFake && !clicked.attacked) return { ...state, selectedId: clicked.id, validAttacks: calcValidAttacks(clicked, state.units, tactic), validMoves: [], damagePreview: null };
       return { ...state, selectedId: null, validAttacks: [], validMoves: [], damagePreview: null };
@@ -1014,10 +1076,10 @@ function aiSelectTactic(state: GameState): string {
   if (ratio < 0.8 || (!isHard && ratio < 1)) { const def = TACTICS.filter(t => t.category === 'defense'); return def[Math.floor(Math.random() * def.length)].id; }
   return TACTICS[Math.floor(Math.random() * TACTICS.length)].id;
 }
-function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: PlayerState; playerSupplyDelta: number; grid: HexCell[] } {
+function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: PlayerState; playerSupplyDelta: number; grid: HexCell[][] } {
   const log: LogEntry[] = []; let units = state.units.map(u => ({ ...u, moved: false, attacked: false }));
   let newGrid = state.grid.map(col => col.map(cell => ({ ...cell })));
-  const aiTactic = TACTICS.find(t => t.id === state.aiTactic); const playerTactic = TACTICS.find(t => t.id === state.playerTactic);
+  const aiTactic = TACTICS.find(t => t.id === state.aiTactic); const aiSecondary = TACTICS.find(t => t.id === state.aiSecondaryTactic); const playerTactic = TACTICS.find(t => t.id === state.playerTactic);
   let ai = { ...state.ai }; let playerSupplyDelta = 0;
   const diffMult = state.difficulty === 'easy' ? 0.8 : state.difficulty === 'hard' ? 1.1 : state.difficulty === 'legendary' ? 1.25 : 1;
   if (aiTactic?.special === 'attrition') { playerSupplyDelta -= 10; log.push({ turn: state.turn, msg: '▸ استنزاف: -10', type: 'tactic' }); }
@@ -1031,6 +1093,34 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
     const enemies = pU(); if (enemies.length === 0) break;
     // Skip frozen/stunned
     if (unit.statusEffects.some(e => e.type === 'frozen' || e.type === 'stunned')) { log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} معطّل`, type: 'info' }); continue; }
+    // AI ability usage
+    if (unit.abilityCooldownLeft <= 0 && !unit.abilityActive && UNIT_DEFS[unit.type].abilityCooldown > 0) {
+      if (unit.type === 'infantry' && unit.hp < unit.maxHp * 0.5) {
+        const uidx = units.findIndex(u => u.id === unit.id);
+        if (uidx >= 0) { units[uidx] = { ...units[uidx], entrenched: true, abilityActive: true, abilityActiveTurns: 2, abilityCooldownLeft: UNIT_DEFS[unit.type].abilityCooldown }; log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) حفر خنادق!`, type: 'tactic' }); }
+      } else if (unit.type === 'armor' && enemies.length > 0) {
+        const highVal = enemies.find(e => UNIT_DEFS[e.type].cost >= 20);
+        if (highVal) { const uidx = units.findIndex(u => u.id === unit.id); if (uidx >= 0) { units[uidx] = { ...units[uidx], abilityActive: true, abilityActiveTurns: 1, abilityCooldownLeft: UNIT_DEFS[unit.type].abilityCooldown }; log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) صدمة!`, type: 'tactic' }); } }
+      } else if (unit.type === 'special_forces' && enemies.length > 0) {
+        const highHp = enemies.filter(e => e.hp > e.maxHp * 0.5);
+        if (highHp.length > 0) { const uidx = units.findIndex(u => u.id === unit.id); if (uidx >= 0) { units[uidx] = { ...units[uidx], abilityActive: true, abilityActiveTurns: 1, abilityCooldownLeft: UNIT_DEFS[unit.type].abilityCooldown }; log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) اغتيال!`, type: 'tactic' }); } }
+      } else if (unit.type === 'cavalry' && enemies.length > 0 && Math.random() < 0.5) {
+        const uidx = units.findIndex(u => u.id === unit.id); if (uidx >= 0) { units[uidx] = { ...units[uidx], abilityActive: true, abilityActiveTurns: 1, abilityCooldownLeft: UNIT_DEFS[unit.type].abilityCooldown }; log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) هجوم سهم!`, type: 'tactic' }); }
+      } else if (unit.type === 'commando' && enemies.length > 0) {
+        const highVal = enemies.find(e => UNIT_DEFS[e.type].cost >= 18);
+        if (highVal) { const uidx = units.findIndex(u => u.id === unit.id); if (uidx >= 0) { units[uidx] = { ...units[uidx], abilityActive: true, abilityActiveTurns: 1, abilityCooldownLeft: UNIT_DEFS[unit.type].abilityCooldown }; log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) عملية خاصة!`, type: 'tactic' }); } }
+      } else if (unit.type === 'fighter_jet' && enemies.length > 0 && Math.random() < 0.4) {
+        const uidx = units.findIndex(u => u.id === unit.id); if (uidx >= 0) { units[uidx] = { ...units[uidx], abilityActive: true, abilityActiveTurns: 1, abilityCooldownLeft: UNIT_DEFS[unit.type].abilityCooldown }; log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) قنبلة!`, type: 'tactic' }); }
+      } else if (unit.type === 'rocket_artillery' && enemies.length >= 3) {
+        const uidx = units.findIndex(u => u.id === unit.id); if (uidx >= 0) { units[uidx] = { ...units[uidx], abilityActive: true, abilityActiveTurns: 1, abilityCooldownLeft: UNIT_DEFS[unit.type].abilityCooldown }; log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) قصف صاروخي!`, type: 'tactic' }); }
+      } else if (unit.type === 'destroyer') {
+        const landTargets = enemies.filter(e => !isNavalUnit(e.type) && hexDist(unit.col, unit.row, e.col, e.row) <= 3);
+        if (landTargets.length > 0) { const uidx = units.findIndex(u => u.id === unit.id); if (uidx >= 0) { units[uidx] = { ...units[uidx], abilityActive: true, abilityActiveTurns: 1, abilityCooldownLeft: UNIT_DEFS[unit.type].abilityCooldown }; log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) قصف ساحلي!`, type: 'tactic' }); } }
+      } else if (unit.type === 'marines' && Math.random() < 0.3) {
+        const uidx = units.findIndex(u => u.id === unit.id); if (uidx >= 0) { units[uidx] = { ...units[uidx], abilityActive: true, abilityActiveTurns: 2, abilityCooldownLeft: UNIT_DEFS[unit.type].abilityCooldown }; log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} (عدو) إنزال بحري!`, type: 'tactic' }); }
+      }
+    }
+
     if (unit.type === 'medics' && unit.abilityCooldownLeft <= 0) { const allies = units.filter(u => u.owner === 'ai' && !u.isFake && u.hp > 0 && u.id !== unit.id && u.hp < u.maxHp && hexDist(unit.col, unit.row, u.col, u.row) <= 2); if (allies.length > 0) { allies.sort((a, b) => (a.hp / a.maxHp) - (b.hp / b.maxHp)); const t = allies[0]; const tIdx = units.findIndex(u => u.id === t.id); if (tIdx >= 0) { units[tIdx] = { ...units[tIdx], hp: Math.min(units[tIdx].maxHp, units[tIdx].hp + 40) }; const uIdx = units.findIndex(u => u.id === unit.id); if (uIdx >= 0) units[uIdx] = { ...units[uIdx], abilityCooldownLeft: 3 }; log.push({ turn: state.turn, msg: `▸ ${UNIT_DEFS[unit.type].nameAr} عالج`, type: 'defense' }); } continue; } }
     if (unit.type === 'supply_truck') { if (unit.abilityCooldownLeft <= 0) { ai = { ...ai, supply: ai.supply + 15 }; const uIdx = units.findIndex(u => u.id === unit.id); if (uIdx >= 0) units[uIdx] = { ...units[uIdx], abilityCooldownLeft: 3 }; } continue; }
     if (unit.type === 'scouts') { const moves = calcValidMoves(unit, state.grid, units, aiTactic, null); if (moves.length > 0) { const fwd = moves.filter(([mc]) => mc < unit.col); if (fwd.length > 0) { const [bc, br] = fwd[Math.floor(Math.random() * fwd.length)]; const uidx = units.findIndex(u => u.id === unit.id); if (uidx >= 0) units[uidx] = { ...units[uidx], col: bc, row: br, moved: true }; } } continue; }
@@ -1050,7 +1140,7 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
       const eTargets = enemies.filter(e => hexDist(currentUnit.col, currentUnit.row, e.col, e.row) <= currentUnit.range + (aiTactic?.special === 'siege' ? 1 : 0));
       if (currentUnit.type === 'commando') eTargets.sort((a, b) => UNIT_DEFS[b.type].cost - UNIT_DEFS[a.type].cost); else eTargets.sort((a, b) => a.hp - b.hp);
       for (const target of eTargets) {
-        const aP = AI_PERSONALITIES[state.aiPersonality || 'balanced']; let aiDmg = calcDamage(currentUnit, target, aiTactic, null, state.grid, state.weather, ai.morale, state.player.morale, false);
+        const aP = AI_PERSONALITIES[state.aiPersonality || 'balanced']; let aiDmg = calcDamage(currentUnit, target, aiTactic, aiSecondary, state.grid, state.weather, ai.morale, state.player.morale, false, units);
         aiDmg = Math.round(aiDmg * (1 + aP.atkBonus) * diffMult);
         if (Math.random() < missChance(currentUnit.type)) { aiDmg = 0; } else if (Math.random() < critChance(currentUnit.type)) { aiDmg = Math.round(aiDmg * 1.5); }
         if (!checkCombineArms(currentUnit, units) || Math.random() > 0.5) {} else aiDmg = Math.round(aiDmg * 1.2);
@@ -1069,7 +1159,7 @@ function aiExecuteTurn(state: GameState): { units: Unit[]; log: LogEntry[]; ai: 
           }
           // Counter damage
           if (hp > 0 && target.range >= hexDist(currentUnit.col, currentUnit.row, target.col, target.row) && target.type !== 'artillery') {
-            const cDmg = calcDamage(target, currentUnit, playerTactic, null, state.grid, state.weather, state.player.morale, ai.morale, true);
+            const cDmg = calcDamage(target, currentUnit, playerTactic, aiSecondary, state.grid, state.weather, state.player.morale, ai.morale, true, units);
             const uidx2 = units.findIndex(u => u.id === currentUnit.id); if (uidx2 >= 0) units[uidx2] = { ...units[uidx2], hp: Math.max(0, units[uidx2].hp - cDmg) };
           }
           const uidx3 = units.findIndex(u => u.id === currentUnit.id); if (uidx3 >= 0) units[uidx3] = { ...units[uidx3], attacked: true, abilityActive: false, abilityActiveTurns: 0 };
@@ -1138,20 +1228,23 @@ function handleAIComplete(state: GameState): GameState {
   const updated = finalUnits.map(u => { let nu = { ...u }; if (nu.abilityCooldownLeft > 0 && !nu.abilityActive) nu.abilityCooldownLeft--; if (nu.abilityActiveTurns > 0) { nu.abilityActiveTurns--; if (nu.abilityActiveTurns <= 0) { nu.abilityActive = false; nu.entrenched = false; } } if (nu.abilityActive && nu.abilityActiveTurns <= 0) { nu.abilityCooldownLeft = UNIT_DEFS[nu.type].abilityCooldown; nu.abilityActive = false; } return nu; });
   // Ceasefire countdown
   let ceasefireActive = state.ceasefireActive;
+  let ceasefireTurnsLeft = state.ceasefireTurnsLeft;
   const aiAlive = finalUnits.filter(u => u.owner === 'ai' && !u.isFake && u.hp > 0).length;
   const playerAlive = finalUnits.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).length;
   const w = checkVictoryCondition(state, finalUnits);
   if (w) {
     const endState: GameState = { ...state, units: finalUnits, ai: newAi, animating: false, log: [...state.log, ...statusResult.log, ...towerResult.log], winner: w, screen: 'game_over', playerUnitsKilled: state.playerUnitsKilled, aiUnitsKilled: state.aiUnitsKilled, playerUsedPincer: state.playerUsedPincer, playerUsedBlitzkrieg: state.playerUsedBlitzkrieg, playerUsedGuerrilla: state.playerUsedGuerrilla, playerUsedSiege: state.playerUsedSiege, artilleryKills: state.artilleryKills, playerLostNoUnits: state.playerLostNoUnits, tacticsUsed: state.tacticsUsed, totalDamageDealt: state.totalDamageDealt, totalDamageReceived: state.totalDamageReceived, ceasefireActive, achievements: state.achievements };
-    if (w === 'player') { const achs = checkAchievements(endState); return { ...endState, achievements: achs }; }
+    if (w === 'player') { const achs = checkAchievements(endState); const newAchToasts = achs.filter(a => !state.achievements.includes(a)).map(a => ({ id: `ach_${a}_${Date.now()}`, msg: `${ACHIEVEMENT_DEFS[a].icon} إنجاز جديد: ${ACHIEVEMENT_DEFS[a].nameAr}!`, icon: ACHIEVEMENT_DEFS[a].icon, time: Date.now() })); return { ...endState, achievements: achs, toasts: [...state.toasts, ...newAchToasts] }; }
     return endState;
   }
   const newTurn = state.turn + 1;
   const pTactic = TACTICS.find(t => t.id === state.playerTactic); let aiSupplyRed = 0;
   if (pTactic?.special === 'attrition') aiSupplyRed += 10; if (pTactic?.special === 'scorched_earth') aiSupplyRed += 20;
-  // Ceasefire check
-  if (state.ceasefireActive && state.turn >= 2) { /* will be decremented below */ }
-  if (ceasefireActive) { if (state.turn % 2 === 0) ceasefireActive = false; } // End after 2 turns
+  // Ceasefire countdown
+  if (ceasefireActive && ceasefireTurnsLeft > 0) {
+    ceasefireTurnsLeft--;
+    if (ceasefireTurnsLeft <= 0) { ceasefireActive = false; }
+  }
   let weather = state.weather; let wTurnsLeft = state.weatherTurnsLeft - 1;
   if (wTurnsLeft <= 0) { weather = getWeather(); wTurnsLeft = 3; }
   let pFactoryBonus = 0, aFactoryBonus = 0;
@@ -1177,6 +1270,8 @@ function handleAIComplete(state: GameState): GameState {
   const visionRange = weather === 'fog' ? 1 : 2;
   stormDmg.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0).forEach(u => revealAround(newGrid, revealed, u.col, u.row, u.type === 'cavalry' || u.type === 'scouts' ? visionRange + 1 : visionRange));
   const aiNewTactic = aiSelectTactic({ ...state, units: stormDmg, turn: newTurn });
+  const aiSecTactics = TACTICS.filter(t => t.id !== aiNewTactic);
+  const aiNewSecondaryTactic = aiSecTactics[Math.floor(Math.random() * aiSecTactics.length)].id;
   let pStrategicSupply = 0, aStrategicSupply = 0, pStrategicTraining = 0, aStrategicTraining = 0;
   const strategicLog: LogEntry[] = [];
   for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) { const cell = aiNewGrid[c][r]; if (!cell.strategicPoint || !cell.strategicOwner) continue; const spDef = STRATEGIC_POINT_DEFS[cell.strategicPoint]; if (cell.strategicOwner === 'player') { if (spDef.bonus === 'supply') pStrategicSupply += 8; else if (spDef.bonus === 'training') pStrategicTraining += 10; else if (spDef.bonus === 'gold') { pStrategicSupply += 15; pStrategicTraining += 5; } else if (spDef.bonus === 'command') pStrategicSupply += 3; } else if (cell.strategicOwner === 'ai') { if (spDef.bonus === 'supply') aStrategicSupply += 8; else if (spDef.bonus === 'training') aStrategicTraining += 10; else if (spDef.bonus === 'gold') { aStrategicSupply += 15; aStrategicTraining += 5; } else if (spDef.bonus === 'command') aStrategicSupply += 3; } }
@@ -1199,7 +1294,7 @@ function handleAIComplete(state: GameState): GameState {
   pMorale += aiNewGrid.flat().filter(c => c.strategicPoint && c.strategicOwner === 'player').length * 3; aMorale += aiNewGrid.flat().filter(c => c.strategicPoint && c.strategicOwner === 'ai').length * 3;
   pMorale = Math.max(0, Math.min(100, pMorale)); aMorale = Math.max(0, Math.min(100, aMorale));
   const pTrainingGain = state.player.training >= 20 ? state.player.training - 20 + 5 : state.player.training + 5 + pStrategicTraining;
-  const nextLog = [...state.log, ...statusResult.log, ...towerResult.log, ...strategicLog, ...moraleEventLog, ...reinforcementLog, { turn: newTurn, msg: `═══ الدور ${newTurn} ═══`, type: 'info' }, { turn: newTurn, msg: `📦 +${supplyGain} إمداد | ${WEATHER_NAMES[weather].icon} ${WEATHER_NAMES[weather].name}`, type: 'info' }];
+  const nextLog: LogEntry[] = [...state.log, ...statusResult.log, ...towerResult.log, ...strategicLog, ...moraleEventLog, ...reinforcementLog, { turn: newTurn, msg: `═══ الدور ${newTurn} ═══`, type: 'info' as const }, { turn: newTurn, msg: `📦 +${supplyGain} إمداد | ${WEATHER_NAMES[weather].icon} ${WEATHER_NAMES[weather].name}`, type: 'info' as const }];
   // Check domination victory
   if (state.victoryType === 'domination' && dominationPlayerTurns >= 3) { return { ...state, units: stormDmg, grid: newGrid, revealed, ai: newAi, animating: false, winner: 'player', screen: 'game_over', log: nextLog, phase: 'planning' as GamePhase, turn: newTurn, player: { ...state.player, supply: Math.max(0, state.player.supply + supplyGain + playerSupplyDelta), morale: pMorale, training: pTrainingGain }, weather, weatherTurnsLeft: wTurnsLeft, dominationPlayerTurns, toasts: [...state.toasts, { id: `t_${Date.now()}`, msg: `🏆 انتصار بالسيطرة!`, icon: '🏆', time: Date.now() }] }; }
   if (state.victoryType === 'domination' && dominationAiTurns >= 3) { return { ...state, units: stormDmg, grid: newGrid, revealed, ai: newAi, animating: false, winner: 'ai', screen: 'game_over', log: nextLog, phase: 'planning' as GamePhase, turn: newTurn }; }
@@ -1211,10 +1306,10 @@ function handleAIComplete(state: GameState): GameState {
     ...state, units: stormDmg, grid: newGrid, revealed, effects: [...state.effects, ...towerResult.effects.filter(e => Date.now() - e.startTime < 1200)],
     ai: { ...newAi, supply: Math.max(0, newAi.supply + aiSupplyGain - aiSupplyRed), training: newAi.training >= 20 ? newAi.training - 20 + 5 + aStrategicTraining : newAi.training + 5 + aStrategicTraining, morale: aMorale },
     phase: 'planning' as GamePhase, turn: newTurn, animating: false,
-    playerTactic: null, secondaryPlayerTactic: null, aiTactic: aiNewTactic, tacticId: null, secondaryTacticId: null,
-    selectedId: null, validMoves: [], validAttacks: [], deployMode: null, buildMode: null, validBuildPlacements: [], playerBuildCount: 0, playerDeployCount: 0, log: nextLog,
+    playerTactic: null, secondaryPlayerTactic: null, aiTactic: aiNewTactic, aiSecondaryTactic: aiNewSecondaryTactic, tacticId: null, secondaryTacticId: null,
+    selectedId: null, validMoves: [], validAttacks: [], deployMode: null, buildMode: null, validBuildPlacements: [], playerBuildCount: 0, playerDeployCount: 0, deployedThisTurn: [], log: nextLog,
     player: { supply: Math.max(0, state.player.supply + supplyGain + playerSupplyDelta), morale: pMorale, training: pTrainingGain },
-    weather, weatherTurnsLeft: wTurnsLeft, previousState: null, ceasefireActive,
+    weather, weatherTurnsLeft: wTurnsLeft, previousState: null, ceasefireActive, ceasefireTurnsLeft,
     dominationPlayerTurns, dominationAiTurns, diplomacyEvent, phaseTransition, toasts: state.toasts,
   };
 }
@@ -1232,7 +1327,7 @@ function checkAchievements(state: GameState): string[] {
   return a;
 }
 // ==================== COMPONENTS ====================
-function MainMenu({ onStart, onHelp, onLoad, onProfile, onMapEditor, profile }: { onStart: (d: Difficulty) => void; onHelp: () => void; onLoad: () => void; onProfile: () => void; onMapEditor: () => void; profile: PlayerProfile }) {
+function MainMenu({ onStart, onHelp, onLoad, onProfile, onMapEditor, onCampaign, onDaily, onTutorial, onSettings, profile }: { onStart: (d: Difficulty) => void; onHelp: () => void; onLoad: () => void; onProfile: () => void; onMapEditor: () => void; onCampaign: () => void; onDaily: () => void; onTutorial: () => void; onSettings: () => void; profile: PlayerProfile }) {
   const [selectedDifficulty, setSelectedDifficulty] = useState<Difficulty | null>(null);
   const difficulties: { key: Difficulty; name: string; desc: string; color: string }[] = [
     { key: 'easy', name: 'جندي', desc: 'سهل - للمبتدئين', color: '#27ae60' },
@@ -1255,6 +1350,14 @@ function MainMenu({ onStart, onHelp, onLoad, onProfile, onMapEditor, profile }: 
             <button onClick={onLoad} className="py-2 px-4 rounded-lg text-gray-200 border border-gray-500 hover:bg-white/5 cursor-pointer text-sm">📂 تحميل لعبة</button>
             <button onClick={onProfile} className="py-2 px-4 rounded-lg text-gray-200 border border-yellow-500 hover:bg-white/5 cursor-pointer text-sm">👤 {profile.rank} Lv{profile.level}</button>
             <button onClick={onMapEditor} className="py-2 px-4 rounded-lg text-purple-200 border border-purple-500 hover:bg-white/5 cursor-pointer text-sm">🗺️ محرر الخرائط</button>
+          </div>
+          <div className="flex gap-2 justify-center mt-2 flex-wrap">
+            <button onClick={onCampaign} className="py-2 px-4 rounded-lg text-orange-200 border border-orange-500 hover:bg-white/5 cursor-pointer text-sm font-bold">⚔️ الحملة</button>
+            <button onClick={onDaily} className="py-2 px-4 rounded-lg text-yellow-200 border border-yellow-500 hover:bg-white/5 cursor-pointer text-sm font-bold">🎯 التحدي اليومي</button>
+          </div>
+          <div className="flex gap-2 justify-center mt-2 flex-wrap">
+            <button onClick={onTutorial} className="py-2 px-4 rounded-lg text-blue-200 border border-blue-500 hover:bg-white/5 cursor-pointer text-sm font-bold">🎓 ابدأ مع درس</button>
+            <button onClick={onSettings} className="py-2 px-4 rounded-lg text-gray-200 border border-gray-500 hover:bg-white/5 cursor-pointer text-sm">⚙️ الإعدادات</button>
           </div>
         </div>
         <div className="mt-4 text-gray-500 text-xs space-y-1">
@@ -1289,9 +1392,10 @@ function DailyChallengeScreen({ onStart, onBack }: { onStart: (d: Difficulty, p:
     </div>
   );
 }
-function MapSelectScreen({ onSelect, onBack, difficulty }: { onSelect: (preset: MapPreset, mapSize?: MapSize, victoryType?: VictoryType, customGrid?: HexCell[][]) => void; onBack: () => void; difficulty: Difficulty }) {
+function MapSelectScreen({ onSelect, onBack, difficulty }: { onSelect: (preset: MapPreset, mapSize?: MapSize, victoryType?: VictoryType, customGrid?: HexCell[][], aiPersonality?: AIPersonality) => void; onBack: () => void; difficulty: Difficulty }) {
   const [selectedSize, setSelectedSize] = useState<MapSize>('medium');
   const [selectedVictory, setSelectedVictory] = useState<VictoryType>('annihilation');
+  const [selectedAI, setSelectedAI] = useState<AIPersonality>('balanced');
   const presets: MapPreset[] = ['classic', 'desert_storm', 'mountain_pass', 'island_hopping', 'forest_ambush', 'urban_warfare', 'river_crossing'];
   const terrainPreview: Record<MapPreset, { colors: string[] }> = {
     classic: { colors: ['#4a6741', '#1a5276', '#8b7355', '#2d5a27', '#c2a83e'] }, desert_storm: { colors: ['#c2a83e', '#48c9b0', '#7f8c8d', '#8b7355', '#8e8e8e'] }, mountain_pass: { colors: ['#8b7355', '#2d5a27', '#4a6741', '#8e8e8e', '#4a6741'] },
@@ -1319,9 +1423,20 @@ function MapSelectScreen({ onSelect, onBack, difficulty }: { onSelect: (preset: 
             ))}
           </div>
         </div>
+        <div className="p-3 rounded-lg mb-2" style={{ background: '#16213e' }}>
+          <div className="text-white font-bold text-sm mb-2">🤖 شخصية العدو</div>
+          <div className="grid grid-cols-3 gap-1">
+            {(Object.entries(AI_PERSONALITIES) as [AIPersonality, typeof AI_PERSONALITIES[keyof typeof AI_PERSONALITIES]][]).map(([key, p]) => (
+              <button key={key} onClick={() => setSelectedAI(key)} className={`p-2 rounded-lg text-center cursor-pointer border-2 transition-all ${selectedAI === key ? 'ring-2 ring-yellow-400' : ''}`} style={{ borderColor: selectedAI === key ? '#f39c12' : '#333', background: selectedAI === key ? '#f39c1233' : '#0d1117' }}>
+                <div className="text-sm">{p.icon} {p.nameAr}</div>
+                <div className="text-xs text-gray-400">{p.desc}</div>
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
           {presets.map(preset => { const info = MAP_PRESET_INFO[preset]; const preview = terrainPreview[preset]; return (
-            <button key={preset} onClick={() => onSelect(preset, selectedSize, selectedVictory)} className="rounded-xl p-4 text-right cursor-pointer transition-all hover:scale-105 border-2" style={{ background: '#16213e', borderColor: info.color + '66' }}>
+            <button key={preset} onClick={() => onSelect(preset, selectedSize, selectedVictory, undefined, selectedAI)} className="rounded-xl p-4 text-right cursor-pointer transition-all hover:scale-105 border-2" style={{ background: '#16213e', borderColor: info.color + '66' }}>
               <div className="flex items-center gap-2 mb-2"><span className="text-2xl">{info.icon}</span><div><div className="text-white font-bold text-sm">{info.name}</div><div className="text-gray-400" style={{ fontSize: '10px' }}>{info.difficulty}</div></div></div>
               <div className="text-gray-300 text-xs mb-3 leading-relaxed">{info.desc}</div>
               <div className="flex gap-0.5 rounded overflow-hidden h-4">{preview.colors.map((c, i) => (<div key={i} className="flex-1" style={{ background: c }} />))}</div>
@@ -1382,6 +1497,13 @@ function GameOverScreen({ state, onRestart, onProfile }: { state: GameState; onR
   const [profile, setProfile] = useState<PlayerProfile>(getDefaultProfile());
   const [xpAwarded, setXpAwarded] = useState(0);
   const [levelUp, setLevelUp] = useState(false);
+  // Detailed battle statistics
+  const playerUnitsKilledByType: Record<string, number> = {};
+  const aiUnitsKilledByType: Record<string, number> = {};
+  state.units.forEach(u => { if (u.hp <= 0 || u.isFake) return; if (u.owner === 'ai') playerUnitsKilledByType[u.type] = (playerUnitsKilledByType[u.type] || 0) + 1; });
+  // Count player buildings built during game
+  const playerBuildings = state.grid.flat().filter(c => c.building && c.buildingOwner === 'player');
+  const weatherTypesEncountered = ['clear', 'rain', 'snow', 'fog', 'storm'] as WeatherType[];
   useEffect(() => { const p = loadProfile(); let xp = 0;
     if (isWin) { xp += 50; if (state.difficulty === 'hard') xp += 25; if (state.difficulty === 'legendary') xp += 50; if (state.playerLostNoUnits) xp += 30; } else { xp += 10; }
     xp += state.playerUnitsKilled * 5; xp += state.strategicPointsCaptured * 15; if (state.tacticsUsed.length >= 2) xp += 10;
@@ -1403,7 +1525,29 @@ function GameOverScreen({ state, onRestart, onProfile }: { state: GameState; onR
         <div className="text-6xl">{isWin ? '🏆' : '💀'}</div>
         <h1 className="text-3xl font-bold" style={{ color: isWin ? '#53d769' : '#e94560' }}>{isWin ? '🎉 انتصار!' : '💀 هزيمة!'}</h1>
         <div className="text-2xl">{'⭐'.repeat(stars)}{'☆'.repeat(5 - stars)}</div>
-        <div className="text-gray-300 text-sm space-y-1"><p>📅 الدور: {state.turn} | {victoryDesc} | {isWin ? '🏆' : '💀'} {state.gameMode === 'campaign' ? '| ⚔️ حملة' : ''}</p><p>⚔️ وحدات دُمرت: {state.playerUnitsKilled} | وحدات خُسرت: {state.aiUnitsKilled}</p><p>💥 ضرر: {state.totalDamageDealt} | 🛡️ ضرر استُقبل: {state.totalDamageReceived}</p></div>
+        <div className="text-gray-300 text-sm space-y-1">
+          <p>📅 الدور: {state.turn} | {victoryDesc} | {isWin ? '🏆' : '💀'} {state.gameMode === 'campaign' ? '| ⚔️ حملة' : ''} {state.gameMode === 'daily' ? '| 🎯 تحدي يومي' : ''}</p>
+          <p>⚔️ وحدات دُمرت: {state.playerUnitsKilled} | وحدات خُسرت: {state.aiUnitsKilled}</p>
+          <p>💥 ضرر: {state.totalDamageDealt} | 🛡️ ضرر استُقبل: {state.totalDamageReceived}</p>
+          <p>🏛️ نقاط استراتيجية: {state.strategicPointsCaptured} | 📋 تكتيكات: {state.tacticsUsed.length > 0 ? state.tacticsUsed.map(t => TACTICS.find(x => x.id === t)?.name).join(', ') : 'لا يوجد'}</p>
+          <p>🤖 شخصية العدو: {AI_PERSONALITIES[state.aiPersonality].icon} {AI_PERSONALITIES[state.aiPersonality].nameAr}</p>
+          <p>🌦️ الطقس: {WEATHER_NAMES[state.weather].icon} {WEATHER_NAMES[state.weather].name}</p>
+          <p>🏗️ مبانٍ: {playerBuildings.length} | 🗺️ الخريطة: {MAP_SIZES[state.mapSize].nameAr} ({state.gameCols}×{state.gameRows})</p>
+        </div>
+        {/* Unit kill breakdown table */}
+        {Object.keys(playerUnitsKilledByType).length > 0 && (
+          <div className="p-2 rounded-lg text-xs" style={{ background: '#0d1117' }}>
+            <div className="text-yellow-400 font-bold text-sm mb-1">📊 تفاصيل الوحدات الناجية</div>
+            <div className="space-y-0.5">
+              {Object.entries(playerUnitsKilledByType).map(([type, count]) => (
+                <div key={type} className="flex justify-between text-gray-300">
+                  <span>{UNIT_DEFS[type as UnitType]?.icon || ''} {UNIT_DEFS[type as UnitType]?.nameAr || type}</span>
+                  <span className="text-green-400">×{count}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="p-3 rounded-lg" style={{ background: '#0d1117' }}><div className="text-yellow-400 font-bold text-sm mb-1">⭐ الخبرة</div><div className="text-lg text-yellow-300 font-bold">+{xpAwarded} XP</div><div className="text-xs text-gray-400">المستوى: {profile.level} | {profile.rank}</div><div className="w-full h-2 rounded-full bg-gray-700 mt-1"><div className="h-2 rounded-full bg-yellow-400" style={{ width: `${(profile.xp / profile.xpToNext) * 100}%` }} /></div>{levelUp && <div className="text-green-400 text-sm mt-1 font-bold">🎊 ارتقاء!</div>}</div>
         <div className="flex gap-2"><button onClick={onRestart} className="flex-1 py-3 px-4 rounded-lg text-lg font-bold text-white cursor-pointer" style={{ background: 'linear-gradient(135deg, #e94560, #c0392b)' }}>🔄 مرة أخرى</button><button onClick={onProfile} className="flex-1 py-3 px-4 rounded-lg text-lg font-bold text-white cursor-pointer" style={{ background: 'linear-gradient(135deg, #3498db, #2980b9)' }}>👤 الملف الشخصي</button></div>
       </div>
@@ -1434,6 +1578,9 @@ function GameHeader({ state, dispatch }: { state: GameState; dispatch: React.Dis
         <button onClick={() => dispatch({ type: 'TOGGLE_SOUND' })} className="px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer" title="صوت">{state.soundEnabled ? '🔊' : '🔇'}</button>
         <button onClick={() => dispatch({ type: 'TOGGLE_STATS' })} className={`px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer ${state.showStats ? 'ring-1 ring-yellow-400' : ''}`} title="إحصائيات">📊</button>
         <button onClick={() => dispatch({ type: 'TOGGLE_MINIMAP' })} className={`px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer ${state.showMiniMap ? 'ring-1 ring-blue-400' : ''}`} title="خريطة مصغرة">🗺️</button>
+        <button onClick={() => dispatch({ type: 'SHOW_SAVE_LOAD', mode: 'save' })} className="px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer" title="حفظ">💾</button>
+        <button onClick={() => dispatch({ type: 'SHOW_SAVE_LOAD', mode: 'load' })} className="px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer" title="تحميل">📂</button>
+        <button onClick={() => dispatch({ type: 'TOGGLE_SETTINGS' })} className="px-2 py-1 rounded text-white hover:bg-white/10 cursor-pointer" title="إعدادات">⚙️</button>
         {state.aiPersonality && <span className="text-xs px-1 py-0.5 rounded" style={{ background: '#0f3460', fontSize: '10px' }}>{AI_PERSONALITIES[state.aiPersonality].icon}</span>}
         <div className="text-gray-300 px-2 py-1 rounded" style={{ background: '#0f3460' }}>{phaseNames[state.phase]}</div>
         {tactic && <div className="text-yellow-400 px-2 py-1 rounded" style={{ background: '#0f3460', fontSize: '10px' }}>{tactic.name}</div>}
@@ -1444,7 +1591,7 @@ function GameHeader({ state, dispatch }: { state: GameState; dispatch: React.Dis
 function MiniMap({ state }: { state: GameState }) {
   if (!state.showMiniMap) return null;
   const scale = 3;
-  const w = COLS * scale; const h = ROWS * scale;
+  const mCols = state.gameCols || COLS; const mRows = state.gameRows || ROWS; const w = mCols * scale; const h = mRows * scale;
   return (
     <div className="absolute top-16 left-2 z-30 p-1 rounded-lg opacity-90 pointer-events-auto cursor-pointer" style={{ background: 'rgba(13,17,23,0.85)', border: '1px solid #0f3460', backdropFilter: 'blur(4px)' }}>
       <div className="text-white text-xs font-bold mb-1 text-center">🗺️</div>
@@ -1551,7 +1698,7 @@ function GameLog({ state }: { state: GameState }) {
   return (
     <div className="rounded-lg p-2" style={{ background: '#16213e', maxHeight: '20vh' }}>
       <div className="text-white text-xs font-bold mb-1">📜 سجل الأحداث</div>
-      <div ref={logRef} className="space-y-0.5 overflow-y-auto max-h-48 text-xs" style={{ scrollbarWidth: '4px', scrollbarColor: '#0f3460' }}>
+      <div ref={logRef} className="space-y-0.5 overflow-y-auto max-h-48 text-xs" style={{ scrollbarWidth: '4px' as any, scrollbarColor: '#0f3460' }}>
         {state.log.slice(-30).reverse().map((entry, i) => (<div key={i} className="text-gray-300 leading-tight" style={{ opacity: 1 - i * 0.02 }}>{entry.msg}</div>))}
       </div>
     </div>
@@ -1561,7 +1708,7 @@ function StatsPanel({ state }: { state: GameState }) {
   const pUnits = state.units.filter(u => u.owner === 'player' && !u.isFake && u.hp > 0); const aUnits = state.units.filter(u => u.owner === 'ai' && !u.isFake && u.hp > 0);
   const pAvgHp = pUnits.length > 0 ? Math.round(pUnits.reduce((s, u) => s + u.hp / u.maxHp * 100, 0) / pUnits.length) : 0;
   const aAvgHp = aUnits.length > 0 ? Math.round(aUnits.reduce((s, u) => s + u.hp / u.maxHp * 100, 0) / aUnits.length) : 0;
-  const totalHexes = COLS * ROWS; const revealedCount = state.revealed.flat().filter(Boolean).length;
+  const totalHexes = (state.gameCols || COLS) * (state.gameRows || ROWS); const revealedCount = state.revealed.flat().filter(Boolean).length;
   const playerSP = state.grid.flat().filter(c => c.strategicPoint && c.strategicOwner === 'player').length;
   const aiSP = state.grid.flat().filter(c => c.strategicPoint && c.strategicOwner === 'ai').length;
   return (
@@ -1588,12 +1735,144 @@ function checkCombineArms(attacker: Unit, units: Unit[]): boolean { const allies
 function isFlanking(attacker: Unit, defender: Unit, units: Unit[]): boolean { const defenderNeighbors = getNeighbors(defender.col, defender.row); const attackerAlliesNearDefender = defenderNeighbors.filter(([c, r]) => { const u = getUnitAt(units, c, r); return u && u.owner === attacker.owner && !u.isFake && u.hp > 0; }).length; return attackerAlliesNearDefender >= 2; }
 function getMoraleEvent(): { msg: string; playerEffect: number; aiEffect: number } | null { if (Math.random() > 0.15) return null; const events = [ { msg: '📣 خطاب تحفيزي! +10 معنويات', playerEffect: 10, aiEffect: 10 }, { msg: '😱 شائعات! -5 معنويات', playerEffect: -5, aiEffect: -5 }, { msg: '🎯 قائد ميدان رائع! +15 معنويات لفريق واحد', playerEffect: 15, aiEffect: -5 }, { msg: '🌧️ أحوال الطقس سيئة! -8 معنويات', playerEffect: -8, aiEffect: -8 }, { msg: '🎵 أغنية حرب! +8 معنويات', playerEffect: 8, aiEffect: 8 } ]; return events[Math.floor(Math.random() * events.length)]; }
 function calcBuildPlacements(state: GameState): [number, number][] { const placements: [number, number][] = []; const engineers = state.units.filter(u => u.owner === 'player' && u.type === 'engineers' && u.hp > 0); if (engineers.length === 0) return placements; for (let c = 0; c < COLS; c++) { for (let r = 0; r < ROWS; r++) { if (!state.revealed[c][r]) continue; if (getUnitAt(state.units, c, r)) continue; const cell = state.grid[c][r]; if (cell.building) continue; const terrain = cell.terrain; if (terrain === 'water' || terrain === 'mountain') continue; const nearEngineer = engineers.some(e => hexDist(e.col, e.row, c, r) <= 2); if (nearEngineer) placements.push([c, r]); } } return placements; }
-function processDefenseTowerAttacks(state: GameState, units: Unit[], log: LogEntry[]): { units: Unit[]; log: LogEntry[]; effects: BattleEffect[] } { let newUnits = [...units]; const newLog = [...log]; const newEffects: BattleEffect[] = []; for (let c = 0; c < COLS; c++) { for (let r = 0; r < ROWS; r++) { const cell = state.grid[c][r]; if (cell.building !== 'defense_tower' || !cell.buildingOwner) continue; const towerOwner = cell.buildingOwner; const enemies = newUnits.filter(u => u.owner !== towerOwner && !u.isFake && u.hp > 0 && hexDist(c, r, u.col, u.row) <= 2); if (enemies.length === 0) continue; enemies.sort((a, b) => hexDist(c, r, a.col, a.row) - hexDist(c, r, b.col, b.row)); const target = enemies[0]; const tLv = cell.buildingLevel || 1; const dmg = tLv >= 3 ? 35 : tLv >= 2 ? 25 : 15; const tIdx = newUnits.findIndex(u => u.id === target.id); if (tIdx >= 0) { newUnits[tIdx] = { ...newUnits[tIdx], hp: Math.max(0, newUnits[tIdx].hp - dmg) }; newLog.push({ turn: state.turn, msg: `🗼 برج دفاعي هاجم ${UNIT_DEFS[target.type].nameAr} - ${dmg} ضرر`, type: 'attack' }); newEffects.push({ id: `fx_tower_${Date.now()}_${c}_${r}`, col: target.col, row: target.row, type: 'explosion', startTime: Date.now() }); if (newUnits[tIdx].hp <= 0) { newUnits = newUnits.filter(u => u.id !== target.id); newLog.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[target.type].nameAr} دُمر بالبرج!`, type: 'system' }); } } } } return { units: newUnits, log: newLog, effects: newEffects }; }
+function processDefenseTowerAttacks(state: GameState, units: Unit[], log: LogEntry[]): { units: Unit[]; log: LogEntry[]; effects: BattleEffect[] } {
+  let newUnits = [...units];
+  const newLog = [...log];
+  const newEffects: BattleEffect[] = [];
+  for (let c = 0; c < COLS; c++) {
+    for (let r = 0; r < ROWS; r++) {
+      const cell = state.grid[c][r];
+      if (cell.building !== 'defense_tower' || !cell.buildingOwner) continue;
+      const towerOwner = cell.buildingOwner;
+      const range = (cell.buildingLevel >= 3 ? 3 : 2);
+      const enemies = newUnits.filter(u => u.owner !== towerOwner && !u.isFake && u.hp > 0 && hexDist(c, r, u.col, u.row) <= range);
+      if (enemies.length === 0) continue;
+      enemies.sort((a, b) => hexDist(c, r, a.col, a.row) - hexDist(c, r, b.col, b.row));
+      const target = enemies[0];
+      const tLv = cell.buildingLevel || 1;
+      const dmg = tLv >= 3 ? 35 : tLv >= 2 ? 25 : 15;
+      const tIdx = newUnits.findIndex(u => u.id === target.id);
+      if (tIdx >= 0) {
+        newUnits[tIdx] = { ...newUnits[tIdx], hp: Math.max(0, newUnits[tIdx].hp - dmg) };
+        newLog.push({ turn: state.turn, msg: `🗼 برج دفاعي هاجم ${UNIT_DEFS[target.type].nameAr} - ${dmg} ضرر`, type: 'attack' as const });
+        newEffects.push({ id: `fx_tower_${Date.now()}_${c}_${r}`, col: target.col, row: target.row, type: 'explosion', startTime: Date.now() });
+        if (newUnits[tIdx].hp <= 0) {
+          newUnits = newUnits.filter(u => u.id !== target.id);
+          newLog.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[target.type].nameAr} دُمر بالبرج!`, type: 'system' as const });
+        }
+      }
+      if (tLv >= 3) {
+        const enemies2 = newUnits.filter(u2 => u2.owner !== towerOwner && !u2.isFake && u2.hp > 0 && hexDist(c, r, u2.col, u2.row) <= 3);
+        if (enemies2.length > 0) {
+          const target2 = enemies2[0];
+          const tIdx2 = newUnits.findIndex(u2 => u2.id === target2.id);
+          if (tIdx2 >= 0) {
+            newUnits[tIdx2] = { ...newUnits[tIdx2], hp: Math.max(0, newUnits[tIdx2].hp - 25) };
+            newLog.push({ turn: state.turn, msg: `🗼 برج دفاعي (هجوم ثاني) على ${UNIT_DEFS[target2.type].nameAr} - 25 ضرر`, type: 'attack' as const });
+            newEffects.push({ id: `fx_tower2_${Date.now()}_${c}_${r}`, col: target2.col, row: target2.row, type: 'explosion', startTime: Date.now() });
+            if (newUnits[tIdx2].hp <= 0) {
+              newUnits = newUnits.filter(u2 => u2.id !== target2.id);
+              newLog.push({ turn: state.turn, msg: `  ✗ ${UNIT_DEFS[target2.type].nameAr} دُمر بالبرج!`, type: 'system' as const });
+            }
+          }
+        }
+      }
+    }
+  }
+  return { units: newUnits, log: newLog, effects: newEffects };
+}
+// ==================== SAVE/LOAD MODAL ====================
+function SaveLoadModal({ state, dispatch }: { state: GameState; dispatch: React.Dispatch<Action> }) {
+  if (!state.showSaveLoad) return null;
+  const slots = [0, 1, 2];
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => dispatch({ type: 'HIDE_SAVE_LOAD' })}>
+      <div className="p-5 rounded-xl max-w-sm w-full mx-4" style={{ background: '#16213e', border: '2px solid #9b59b6' }} onClick={e => e.stopPropagation()}>
+        <h3 className="text-white font-bold text-lg text-center mb-4">{state.saveLoadMode === 'save' ? '💾 حفظ اللعبة' : '📂 تحميل اللعبة'}</h3>
+        <div className="space-y-2">
+          {slots.map(slot => {
+            let info = 'فارغ';
+            let saveDate = '';
+            try { const d = localStorage.getItem(`warGame_save_${slot}`); if (d) { const s = JSON.parse(d); info = `الدور ${s.turn || '?'} | ${s.difficulty || '?'}`; saveDate = s.savedAt ? new Date(s.savedAt).toLocaleString('ar') : ''; } } catch {}
+            return (
+              <div key={slot} className="flex items-center justify-between p-2 rounded-lg" style={{ background: '#0d1117' }}>
+                <div className="text-white text-sm">فتحة {slot + 1}</div>
+                <div className="text-gray-400 text-xs">{info}</div>
+                {saveDate && <div className="text-gray-500 text-xs">{saveDate}</div>}
+                <div className="flex gap-1">
+                  {state.saveLoadMode === 'save' ? (
+                    <button onClick={() => { dispatch({ type: 'SAVE_GAME', slot }); dispatch({ type: 'HIDE_SAVE_LOAD' }); }} className="px-2 py-1 rounded bg-green-600 text-white text-xs cursor-pointer">حفظ</button>
+                  ) : (
+                    <button onClick={() => { dispatch({ type: 'LOAD_GAME', slot }); dispatch({ type: 'HIDE_SAVE_LOAD' }); }} className="px-2 py-1 rounded bg-blue-600 text-white text-xs cursor-pointer">تحميل</button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <button onClick={() => dispatch({ type: 'HIDE_SAVE_LOAD' })} className="w-full py-2 mt-4 rounded-lg text-white border border-gray-500 hover:bg-white/5 cursor-pointer text-sm">إغلاق</button>
+      </div>
+    </div>
+  );
+}
+
+function SettingsModal({ state, dispatch }: { state: GameState; dispatch: React.Dispatch<Action> }) {
+  if (!state.settingsOpen) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => dispatch({ type: 'TOGGLE_SETTINGS' })}>
+      <div className="p-5 rounded-xl max-w-sm w-full mx-4" style={{ background: '#16213e', border: '2px solid #3498db' }} onClick={e => e.stopPropagation()}>
+        <h3 className="text-white font-bold text-lg text-center mb-4">⚙️ الإعدادات</h3>
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <span className="text-white text-sm">🔊 الصوت</span>
+            <button onClick={() => dispatch({ type: 'TOGGLE_SOUND' })} className="px-3 py-1.5 rounded-lg text-white cursor-pointer text-sm" style={{ background: state.soundEnabled ? '#27ae60' : '#e74c3c' }}>{state.soundEnabled ? 'مفعّل' : 'مكتوم'}</button>
+          </div>
+          <div className="p-3 rounded-lg" style={{ background: '#0d1117' }}>
+            <div className="text-gray-400 text-xs">🌐 اللغة</div>
+            <div className="text-white text-sm mt-1">العربية (حالياً)</div>
+          </div>
+          <div className="p-3 rounded-lg" style={{ background: '#0d1117' }}>
+            <div className="text-gray-400 text-xs">🗺️ حجم الخريطة</div>
+            <div className="text-white text-sm mt-1">{state.gameCols} × {state.gameRows}</div>
+          </div>
+        </div>
+        <button onClick={() => dispatch({ type: 'TOGGLE_SETTINGS' })} className="w-full py-2 mt-4 rounded-lg text-white cursor-pointer" style={{ background: '#3498db' }}>إغلاق</button>
+      </div>
+    </div>
+  );
+}
+
+function TransportDeployPanel({ state, dispatch }: { state: GameState; dispatch: React.Dispatch<Action> }) {
+  if (!state.transportDeployMode) return null;
+  const types: UnitType[] = ['infantry', 'medics', 'engineers'];
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="p-5 rounded-xl max-w-sm w-full mx-4" style={{ background: '#16213e', border: '2px solid #3498db' }}>
+        <h3 className="text-white font-bold text-lg text-center mb-3">🛳️ اختر وحدة للإنزال</h3>
+        <div className="grid grid-cols-3 gap-2">
+          {types.map(t => { const d = UNIT_DEFS[t]; return (
+            <button key={t} onClick={() => dispatch({ type: 'TRANSPORT_DEPLOY_SELECT', unitType: t })} className="p-3 rounded-lg text-center cursor-pointer hover:scale-105 transition-all border-2" style={{ background: '#0d1117', borderColor: '#3498db' }}>
+              <div className="text-2xl">{d.icon}</div>
+              <div className="text-white text-xs font-bold mt-1">{d.nameAr}</div>
+            </button>
+          ); })}
+        </div>
+        <button onClick={() => dispatch({ type: 'HIDE_SAVE_LOAD' })} className="w-full py-2 mt-3 rounded-lg text-white border border-gray-500 hover:bg-white/5 cursor-pointer text-sm">↩️ إلغاء</button>
+      </div>
+    </div>
+  );
+}
+
 // ==================== HEX GRID COMPONENT ====================
-function HexGridComp({ state, dispatch }: { state: GameState; dispatch: React.Dispatch<Action> }) {
-  const scale = COLS <= 11 ? 1.15 : COLS >= 16 ? 0.8 : 1;
-  const svgW = (COLS * HEX_SIZE * 1.5 + HEX_SIZE + 20) * scale;
-  const svgH = (ROWS * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20) * scale;
+function HexGridComp({ state, dispatch, multiSelectedIds }: { state: GameState; dispatch: React.Dispatch<Action>; multiSelectedIds?: string[] }) {
+  const gCols = state.gameCols || COLS; const gRows = state.gameRows || ROWS;
+  const [containerWidth, setContainerWidth] = useState(0);
+  useEffect(() => { const update = () => setContainerWidth(window.innerWidth); update(); window.addEventListener('resize', update); return () => window.removeEventListener('resize', update); }, []);
+  const baseScale = gCols <= 11 ? 1.15 : gCols >= 16 ? 0.8 : 1;
+  const screenScale = containerWidth < 768 ? Math.max(0.5, containerWidth / 900) : 1;
+  const scale = baseScale * screenScale;
+  const svgW = (gCols * HEX_SIZE * 1.5 + HEX_SIZE + 20) * scale;
+  const svgH = (gRows * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20) * scale;
   const tactic = TACTICS.find(t => t.id === state.playerTactic) ?? null;
   const secondary = TACTICS.find(t => t.id === state.secondaryPlayerTactic) ?? null;
   const validMoveSet = new Set(state.validMoves.map(([c, r]) => `${c},${r}`));
@@ -1603,12 +1882,12 @@ function HexGridComp({ state, dispatch }: { state: GameState; dispatch: React.Di
   let dmgPreview: { col: number; row: number; dmg: number; counterDmg: number } | null = null;
   if (state.hoverHex && selected && validAttackSet.has(`${state.hoverHex[0]},${state.hoverHex[1]}`)) {
     const target = getUnitAt(state.units, state.hoverHex[0], state.hoverHex[1]);
-    if (target) { const dmg = calcDamage(selected, target, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false); const cDmg = calcCounterDamage(selected, target, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale); dmgPreview = { col: state.hoverHex[0], row: state.hoverHex[1], dmg, counterDmg: cDmg }; }
+    if (target) { const dmg = calcDamage(selected, target, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, false, state.units); const cDmg = calcCounterDamage(selected, target, tactic, secondary, state.grid, state.weather, state.player.morale, state.ai.morale, state.units); dmgPreview = { col: state.hoverHex[0], row: state.hoverHex[1], dmg, counterDmg: cDmg }; }
   }
   const statusEffectIcons = (u: Unit) => u.statusEffects.length > 0 ? u.statusEffects.map(e => STATUS_EFFECT_DEFS[e.type].icon).join('') : '';
   return (
-    <div className={`relative rounded-xl overflow-auto ${state.shakeKey % 2 === 1 ? 'animate-shake' : ''}`} style={{ background: '#0d1117', border: '2px solid #1e3a5f', maxHeight: '60vh' }}>
-      <svg width={svgW} height={svgH} viewBox={`0 0 ${(COLS * HEX_SIZE * 1.5 + HEX_SIZE + 20)} ${(ROWS * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20)}`} className="block" style={{ minWidth: svgW }}>
+    <div className={`relative rounded-xl overflow-auto ${state.shakeKey % 2 === 1 ? 'animate-shake' : ''}`} style={{ background: '#0d1117', border: '2px solid #1e3a5f', maxHeight: '70vh', touchAction: 'none' }}>
+      <svg width={svgW} height={svgH} viewBox={`0 0 ${(gCols * HEX_SIZE * 1.5 + HEX_SIZE + 20)} ${(gRows * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20)}`} className="block" style={{ minWidth: svgW }}>
         <g transform={`scale(${scale})`}>
         <defs>
           <filter id="glow"><feGaussianBlur stdDeviation="3" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
@@ -1659,7 +1938,7 @@ function HexGridComp({ state, dispatch }: { state: GameState; dispatch: React.Di
             </g>
           );
         }))}
-        {state.effects.map(fx => { const [cx, cy] = hexCenter(fx.col, fx.row); const age = (Date.now() - fx.startTime) / 1000; if (age > 1) return null; const opacity = 1 - age; const r = fx.type === 'explosion' || fx.type === 'death' ? 15 + age * 20 : 10 + age * 10; return <circle key={fx.id} cx={cx} cy={cy} r={r} fill="none" stroke={fx.type === 'heal' ? '#2ecc71' : '#e74c3c'} strokeWidth={3 * opacity} opacity={opacity} style={{ pointerEvents: 'none' }} />; })}
+        {state.effects.map(fx => { const [cx, cy] = hexCenter(fx.col, fx.row); const age = (Date.now() - fx.startTime) / 1000; if (age > 1.5) return null; const opacity = 1 - age / 1.5; if (fx.type === 'flash') { return <rect key={fx.id} x={cx - 15} y={cy - 15} width={30} height={30} fill="white" opacity={Math.max(0, opacity * 0.8)} style={{ pointerEvents: 'none' }} />; } if (fx.type === 'particle') { const r = 5 + age * 15; const particles = [0, 1, 2, 3, 4, 5].map(i => { const angle = (i / 6) * Math.PI * 2 + age * 3; const px = cx + Math.cos(angle) * r; const py = cy + Math.sin(angle) * r; return <circle key={i} cx={px} cy={py} r={2 * opacity} fill={fx.intensity && fx.intensity > 1 ? '#ff6b35' : '#e74c3c'} opacity={opacity} />; }); return <g key={fx.id}>{particles}</g>; } const r = fx.type === 'explosion' || fx.type === 'death' ? 15 + age * 25 : 10 + age * 12; return <circle key={fx.id} cx={cx} cy={cy} r={r} fill="none" stroke={fx.type === 'heal' ? '#2ecc71' : fx.type === 'death' ? '#ff6b35' : '#e74c3c'} strokeWidth={(3 + (fx.intensity || 1)) * opacity} opacity={opacity} style={{ pointerEvents: 'none' }} />; })}
         </g>
       </svg>
       {state.hoverHex && !!(state.revealed[state.hoverHex[0]]?.[state.hoverHex[1]]) && <HexTooltip state={state} col={state.hoverHex[0]} row={state.hoverHex[1]} />}
@@ -1672,7 +1951,7 @@ function HexTooltip({ state, col, row }: { state: GameState; col: number; row: n
   const terrain = TERRAIN_DEFS[cell.terrain]; const [cx, cy] = hexCenter(col, row);
   const bldg = cell.building ? BUILDING_DEFS[cell.building] : null;
   return (
-    <div className="absolute z-50 p-2 rounded-lg text-xs text-white pointer-events-none" style={{ background: 'rgba(22,33,62,0.95)', border: '1px solid #0f3460', left: `${(cx / (COLS * HEX_SIZE * 1.5 + HEX_SIZE + 20)) * 100}%`, top: `${(cy / (ROWS * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20)) * 100}%`, transform: 'translate(-50%, -120%)', maxWidth: '200px' }}>
+    <div className="absolute z-50 p-2 rounded-lg text-xs text-white pointer-events-none" style={{ background: 'rgba(22,33,62,0.95)', border: '1px solid #0f3460', left: `${(cx / ((state.gameCols || COLS) * HEX_SIZE * 1.5 + HEX_SIZE + 20)) * 100}%`, top: `${(cy / ((state.gameRows || ROWS) * SQRT3 * HEX_SIZE + SQRT3 * HEX_SIZE / 2 + 20)) * 100}%`, transform: 'translate(-50%, -120%)', maxWidth: '200px' }}>
       <div className="font-bold">{terrain.icon} {terrain.nameAr} | دفاع: {terrain.defBonus > 0 ? '+' : ''}{Math.round(terrain.defBonus * 100)}%</div>
       {bldg && <div className="text-yellow-400">{bldg.icon} {bldg.nameAr}: {bldg.desc} {'⭐'.repeat(cell.buildingLevel)}</div>}
       {cell.strategicPoint && (() => { const spDef = STRATEGIC_POINT_DEFS[cell.strategicPoint]; const ownerName = cell.strategicOwner === 'player' ? 'أنت' : cell.strategicOwner === 'ai' ? 'عدو' : 'محايد'; return <div style={{ color: spDef.color }}>{spDef.icon} {spDef.nameAr} ({ownerName}): {spDef.desc}</div>; })()}
@@ -1732,7 +2011,7 @@ function TacticSelector({ state, dispatch }: { state: GameState; dispatch: React
           <div className="text-xs font-bold" style={{ color: cat.color }}>{cat.label}</div>
           <div className="grid grid-cols-2 gap-1">
             {TACTICS.filter(t => t.category === cat.key).map(t => (
-              <button key={t.id} onClick={() => dispatch({ type: 'SELECT_TACTIC', id: t.id })} className={`p-1.5 rounded text-xs text-right cursor-pointer ${state.tacticId === t.id ? 'ring-2' : ''}`} style={{ background: state.tacticId === t.id ? '#0f3460' : '#1a2332', borderColor: cat.color }}>
+              <button key={t.id} onClick={() => dispatch({ type: 'SELECT_TACTIC', id: t.id })} className={`p-2 rounded text-xs text-right cursor-pointer min-h-[36px] ${state.tacticId === t.id ? 'ring-2' : ''}`} style={{ background: state.tacticId === t.id ? '#0f3460' : '#1a2332', borderColor: cat.color }}>
                 <div className="font-bold text-white" style={{ fontSize: '11px' }}>{t.name}</div>
                 <div className="text-gray-400" style={{ fontSize: '9px' }}>{t.desc}</div>
               </button>
@@ -1808,6 +2087,7 @@ function MapEditorScreen({ onBack, onPlay }: { onBack: () => void; onPlay: (grid
   const [editorRows, setEditorRows] = useState(10);
   const [editorGrid, setEditorGrid] = useState<HexCell[][]>(() => makeGrid());
   const [mapName, setMapName] = useState('خريطة مخصصة');
+  const [editorHistory, setEditorHistory] = useState<HexCell[][][]>([]);
   const savedMaps = useState(() => { try { const s = localStorage.getItem('warGame_customMaps'); return s ? JSON.parse(s) : []; } catch { return []; } });
   const handleResize = (newCols: number, newRows: number) => {
     setEditorCols(newCols); setEditorRows(newRows);
@@ -1816,6 +2096,7 @@ function MapEditorScreen({ onBack, onPlay }: { onBack: () => void; onPlay: (grid
     setEditorGrid(newGrid);
   };
   const handleHexClick = (col: number, row: number) => {
+    setEditorHistory(prev => [...prev.slice(-49), editorGrid.map(c => c.map(cell => ({ ...cell })))]);
     setEditorGrid(prev => prev.map(c => c.map(cell => {
       if (cell.col !== col || cell.row !== row) return cell;
       if (tool === 'terrain') return { ...cell, terrain: selectedTerrain };
@@ -1850,6 +2131,7 @@ function MapEditorScreen({ onBack, onPlay }: { onBack: () => void; onPlay: (grid
           <input value={mapName} onChange={e => setMapName(e.target.value)} className="bg-gray-800 text-white px-3 py-1.5 rounded text-sm" placeholder="اسم الخريطة" />
           <select value={editorCols} onChange={e => handleResize(Number(e.target.value), editorRows)} className="bg-gray-800 text-white px-2 py-1.5 rounded text-sm"><option value={10}>10 أعمدة</option><option value={14}>14 أعمدة</option><option value={18}>18 عمود</option></select>
           <select value={editorRows} onChange={e => handleResize(editorCols, Number(e.target.value))} className="bg-gray-800 text-white px-2 py-1.5 rounded text-sm"><option value={8}>8 صفوف</option><option value={10}>10 صفوف</option><option value={12}>12 صف</option></select>
+          <button onClick={() => { if (editorHistory.length > 0) { const prev = editorHistory[editorHistory.length - 1]; setEditorGrid(prev); setEditorHistory(h => h.slice(0, -1)); } }} className="py-1.5 px-3 rounded bg-gray-600 text-white text-sm cursor-pointer hover:bg-gray-500" disabled={editorHistory.length === 0}>↩️ تراجع</button>
           <button onClick={handleClear} className="py-1.5 px-3 rounded bg-red-600 text-white text-sm cursor-pointer hover:bg-red-500">🗑️ مسح</button>
           <button onClick={handleSave} className="py-1.5 px-3 rounded bg-green-600 text-white text-sm cursor-pointer hover:bg-green-500">💾 حفظ</button>
           <button onClick={handlePlay} className="py-1.5 px-3 rounded bg-blue-600 text-white text-sm cursor-pointer hover:bg-blue-500">▶️ العب</button>
@@ -1894,9 +2176,13 @@ export default function WarGame() {
   const [state, dispatch] = useReducer(gameReducer, initialState);
   const [pendingDifficulty, setPendingDifficulty] = useState<Difficulty>('normal');
   const [profile, setProfile] = useState<PlayerProfile>(getDefaultProfile());
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [isMobile, setIsMobile] = useState(false);
   const effectTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => { setProfile(loadProfile()); }, [state.screen]);
-  useEffect(() => { effectTimer.current = setInterval(() => { if (state.effects.length > 0) dispatch({ type: 'CLEAR_EFFECTS' }); }, 500); return () => { if (effectTimer.current) clearInterval(effectTimer.current); }; }, [state.effects.length]);
+  // Detect mobile viewport
+  useEffect(() => { const check = () => { const m = window.innerWidth < 768; setIsMobile(m); if (m) setSidebarOpen(false); }; check(); window.addEventListener('resize', check); return () => window.removeEventListener('resize', check); }, []);
+  useEffect(() => { effectTimer.current = setInterval(() => { if (state.effects.length > 0) dispatch({ type: 'CLEAR_EFFECTS' }); if (state.animatingUnit && Date.now() - state.animatingUnit.startTime > 300) dispatch({ type: 'CLEAR_ANIMATING_UNIT' }); }, 100); return () => { if (effectTimer.current) clearInterval(effectTimer.current); }; }, [state.effects.length, state.animatingUnit]);
   useEffect(() => { if (state.phase === 'ai_turn' && state.animating) { const timer = setTimeout(() => dispatch({ type: 'AI_TURN_COMPLETE' }), 800); return () => clearTimeout(timer); } }, [state.phase, state.animating]);
   useEffect(() => { if (state.toasts.length > 0) { const timer = setTimeout(() => dispatch({ type: 'DISMISS_TOAST', id: state.toasts[0].id }), 3000); return () => clearTimeout(timer); } }, [state.toasts]);
   useEffect(() => { if (state.phaseTransition) { const timer = setTimeout(() => dispatch({ type: 'CLEAR_PHASE_TRANSITION' }), 1500); return () => clearTimeout(timer); } }, [state.phaseTransition]);
@@ -1904,8 +2190,8 @@ export default function WarGame() {
     COLS = cols; ROWS = rows;
     dispatch({ type: 'START_GAME', difficulty: pendingDifficulty, mapPreset: 'classic', mapSize: 'medium', customGrid: grid });
   }, [pendingDifficulty]);
-  if (state.screen === 'menu') return <MainMenu onStart={(d) => { setPendingDifficulty(d); dispatch({ type: 'SET_SCREEN', screen: 'map_select' }); }} onHelp={() => dispatch({ type: 'SET_SCREEN', screen: 'how_to_play' })} onLoad={() => dispatch({ type: 'LOAD_GAME', slot: 0 })} onProfile={() => { setProfile(loadProfile()); dispatch({ type: 'SET_SCREEN', screen: 'profile' }); }} onMapEditor={() => dispatch({ type: 'SET_SCREEN', screen: 'map_editor' })} profile={profile} />;
-  if (state.screen === 'map_select') return <MapSelectScreen onSelect={(preset, mapSize, victoryType, customGrid) => dispatch({ type: 'START_GAME', difficulty: pendingDifficulty, mapPreset: customGrid ? 'classic' : preset, mapSize: mapSize || 'medium', victoryType: victoryType || 'annihilation', customGrid: customGrid || undefined })} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} difficulty={pendingDifficulty} />;
+  if (state.screen === 'menu') return (<><MainMenu onStart={(d) => { setPendingDifficulty(d); dispatch({ type: 'SET_SCREEN', screen: 'map_select' }); }} onHelp={() => dispatch({ type: 'SET_SCREEN', screen: 'how_to_play' })} onLoad={() => dispatch({ type: 'LOAD_GAME', slot: 0 })} onProfile={() => { setProfile(loadProfile()); dispatch({ type: 'SET_SCREEN', screen: 'profile' }); }} onMapEditor={() => dispatch({ type: 'SET_SCREEN', screen: 'map_editor' })} onCampaign={() => dispatch({ type: 'SET_SCREEN', screen: 'campaign' })} onDaily={() => dispatch({ type: 'SET_SCREEN', screen: 'daily' })} onTutorial={() => { setPendingDifficulty('easy'); dispatch({ type: 'START_GAME', difficulty: 'easy', mapPreset: 'classic', mapSize: 'small' }); setTimeout(() => dispatch({ type: 'TOGGLE_TUTORIAL' }), 100); }} onSettings={() => dispatch({ type: 'TOGGLE_SETTINGS' })} profile={profile} /><SettingsModal state={state} dispatch={dispatch} /></>);
+  if (state.screen === 'map_select') return <MapSelectScreen onSelect={(preset, mapSize, victoryType, customGrid, aiPersonality) => dispatch({ type: 'START_GAME', difficulty: pendingDifficulty, mapPreset: customGrid ? 'classic' : preset, mapSize: mapSize || 'medium', victoryType: victoryType || 'annihilation', aiPersonality: aiPersonality || undefined, customGrid: customGrid || undefined })} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} difficulty={pendingDifficulty} />;
   if (state.screen === 'map_editor') return <MapEditorScreen onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} onPlay={handleCustomMapPlay} />;
   if (state.screen === 'campaign') return <CampaignScreen onSelect={(m) => dispatch({ type: 'START_GAME', difficulty: m.difficulty, mapPreset: m.mapPreset, aiPersonality: m.aiPersonality, gameMode: 'campaign', campaignMission: m.id })} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} profile={profile} />;
   if (state.screen === 'daily') return <DailyChallengeScreen onStart={(d, p, a) => dispatch({ type: 'START_GAME', difficulty: d, mapPreset: p, aiPersonality: a, gameMode: 'daily' })} onBack={() => dispatch({ type: 'SET_SCREEN', screen: 'menu' })} />;
@@ -1915,12 +2201,26 @@ export default function WarGame() {
   return (
     <div className="min-h-screen p-2 md:p-3" dir="rtl" style={{ background: '#0d1117' }}>
       <GameHeader state={state} dispatch={dispatch} />
-      <div className="flex flex-col lg:flex-row gap-2">
+      <div className="flex flex-col lg:flex-row gap-2 relative">
         <div className="flex-1">
-          <HexGridComp state={state} dispatch={dispatch} />
+          <HexGridComp state={state} dispatch={dispatch} multiSelectedIds={state.multiSelectedIds} />
+          {state.multiSelectedIds && state.multiSelectedIds.length > 1 && (state.phase === 'movement') && (
+            <div className="flex items-center justify-center gap-2 mt-1">
+              <div className="text-yellow-400 text-xs">🔗 {state.multiSelectedIds.length} وحدات محددة (Shift+click)</div>
+              <button onClick={() => dispatch({ type: 'CLEAR_MULTI_SELECT' })} className="px-3 py-1 rounded-lg text-xs font-bold text-white cursor-pointer" style={{ background: '#e74c3c' }}>مسح التحديد</button>
+            </div>
+          )}
           <div className="mt-2"><GameLog state={state} /></div>
         </div>
-        <div className="w-full lg:w-64 space-y-2">
+        {/* Mobile sidebar toggle */}
+        {isMobile && (
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="fixed bottom-4 left-4 z-40 w-12 h-12 rounded-full flex items-center justify-center text-white text-xl shadow-lg cursor-pointer" style={{ background: 'linear-gradient(135deg, #e94560, #c0392b)' }}>
+            {sidebarOpen ? '✕' : '📊'}
+          </button>
+        )}
+        {/* Sidebar */}
+        <div className={`${isMobile ? (sidebarOpen ? 'fixed inset-0 z-30 bg-black/80 pt-16 overflow-y-auto' : 'hidden') : ''} w-full lg:w-64 space-y-2`}>
+          {isMobile && sidebarOpen && <button onClick={() => setSidebarOpen(false)} className="absolute top-2 left-2 text-white text-2xl z-50 cursor-pointer">✕</button>}
           {state.showMiniMap && <MiniMap state={state} />}
           {state.showStats && <StatsPanel state={state} />}
           {state.phase === 'planning' ? <TacticSelector state={state} dispatch={dispatch} /> : <UnitCardPanel state={state} dispatch={dispatch} />}
@@ -1936,8 +2236,13 @@ export default function WarGame() {
         </div>
       </div>
       <BattleModal state={state} dispatch={dispatch} />
+      <SaveLoadModal state={state} dispatch={dispatch} />
+      <SettingsModal state={state} dispatch={dispatch} />
       <DiplomacyModal state={state} dispatch={dispatch} />
       <ToastNotifications state={state} />
+      {state.tutorialActive && state.phase === 'planning' && <div className="fixed bottom-4 left-4 z-30 p-3 rounded-lg max-w-xs pointer-events-none" style={{ background: 'rgba(22,33,62,0.95)', border: '2px solid #f39c12' }}><div className="text-yellow-400 font-bold text-sm mb-1">🎓 دليل</div><div className="text-white text-xs">اختر تكتيكك من القائمة الجانبية ثم اضغط تأكيد</div></div>}
+      {state.tutorialActive && state.phase === 'movement' && <div className="fixed bottom-4 left-4 z-30 p-3 rounded-lg max-w-xs pointer-events-none" style={{ background: 'rgba(22,33,62,0.95)', border: '2px solid #f39c12' }}><div className="text-yellow-400 font-bold text-sm mb-1">🎓 دليل</div><div className="text-white text-xs">انقر على وحدة ثم انقر على خلية خضراء للتحرك</div></div>}
+      {state.tutorialActive && state.phase === 'attack' && <div className="fixed bottom-4 left-4 z-30 p-3 rounded-lg max-w-xs pointer-events-none" style={{ background: 'rgba(22,33,62,0.95)', border: '2px solid #f39c12' }}><div className="text-yellow-400 font-bold text-sm mb-1">🎓 دليل</div><div className="text-white text-xs">انقر على عدو (خلايا حمراء) للهجوم</div></div>}
       <PhaseTransition text={state.phaseTransition} />
     </div>
   );
